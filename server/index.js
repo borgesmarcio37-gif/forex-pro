@@ -466,6 +466,213 @@ setInterval(async () => {
   } catch(e) { /* silent */ }
 }, 5 * 60 * 1000);
 
+// ── BACKTEST ENGINE ───────────────────────────────────────────────────────────
+app.get("/api/backtest", async (req, res) => {
+  const { symbol="EUR/USD" } = req.query;
+  try {
+    const d = await td("/time_series", { symbol, interval:"1day", outputsize:500 });
+    const raw = [...d.values].reverse(); // oldest first
+    const isJpy = symbol.includes("JPY");
+    const isCrypto = ["BTC/USD","ETH/USD","SOL/USD"].includes(symbol);
+
+    // Build OHLCV array
+    const bars = raw.map(v => ({
+      date: v.datetime,
+      open: parseFloat(v.open),
+      high: parseFloat(v.high),
+      low:  parseFloat(v.low),
+      close: parseFloat(v.close),
+    }));
+
+    // Session hours (UTC) for each symbol
+    const SESSION_HOURS = {
+      "EUR/USD": [7,16], "GBP/USD": [7,16], "USD/CHF": [7,16],
+      "EUR/GBP": [7,11], "AUD/USD": [0,7],  "USD/CAD": [13,17],
+      "USD/JPY": [0,9],  "EUR/JPY": [7,9],
+      "BTC/USD": [0,24], "ETH/USD": [0,24], "SOL/USD": [0,24],
+    };
+    const [sessStart, sessEnd] = SESSION_HOURS[symbol] || [7,16];
+
+    const trades = {
+      confluence: [],   // RSI+MACD+EMA200 all aligned
+      rsi_extreme: [],  // RSI<30 LONG or RSI>70 SHORT
+      session: [],      // same as confluence but only in session hours
+      all_signals: [],  // any 2+ signals
+    };
+
+    const ladderHits = { total:0, hits:{} };
+    const PIP_MULT = isCrypto ? 1 : (isJpy ? 100 : 10000);
+
+    // Simulate from bar 200 onwards (need history for indicators)
+    for (let i = 200; i < bars.length - 1; i++) {
+      const slice   = bars.slice(0, i+1);
+      const closes  = slice.map(b => b.close);
+      const highs   = slice.map(b => b.high);
+      const lows    = slice.map(b => b.low);
+
+      // Calculate indicators
+      const rsi    = calcRSI(closes);
+      const macd   = calcMACD(closes);
+      const ema50  = calcEMA(closes, 50);
+      const ema200 = calcEMA(closes, 200);
+      const atr    = calcATR(closes, highs, lows);
+      const price  = closes[closes.length-1];
+      const bull   = price > ema200;
+      const macdB  = macd.hist > 0;
+
+      // Signal conditions
+      const trendOk    = bull;
+      const macdOk     = macdB;
+      const rsiOk      = (bull && rsi < 60 && rsi > 40) || (!bull && rsi > 40 && rsi < 60);
+      const confluence = (trendOk ? 1:0) + (macdOk ? 1:0) + (rsiOk ? 1:0);
+
+      const rsiLong  = rsi < 30;
+      const rsiShort = rsi > 70;
+
+      const dateStr  = bars[i].date;
+      const dayOfWk  = new Date(dateStr).getUTCDay();
+      const inSession = dayOfWk >= 1 && dayOfWk <= 5; // weekday = session for daily bars
+
+      // Entry price = next bar open
+      const entry   = bars[i+1].open;
+      const atrPips = atr * PIP_MULT;
+      const slDist  = atr * 1.2;
+      const tp1Dist = atr * 1.8;
+      const tp2Dist = atr * 3.0;
+
+      // Simulate trade outcome using next bar's H/L
+      function simTrade(dir) {
+        if (i + 1 >= bars.length) return null;
+        const nextBar = bars[i+1];
+        const sl  = dir === "LONG" ? entry - slDist  : entry + slDist;
+        const tp1 = dir === "LONG" ? entry + tp1Dist : entry - tp1Dist;
+        const tp2 = dir === "LONG" ? entry + tp2Dist : entry - tp2Dist;
+
+        // Check if SL or TP hit on next bar
+        let result = "open";
+        if (dir === "LONG") {
+          if (nextBar.low  <= sl)  result = "SL";
+          if (nextBar.high >= tp1) result = result === "SL" ? "SL" : "TP1";
+          if (nextBar.high >= tp2) result = result === "SL" ? "SL" : "TP2";
+        } else {
+          if (nextBar.high >= sl)  result = "SL";
+          if (nextBar.low  <= tp1) result = result === "SL" ? "SL" : "TP1";
+          if (nextBar.low  <= tp2) result = result === "SL" ? "SL" : "TP2";
+        }
+        if (result === "open") result = "TP1"; // close at end of bar
+
+        const pnl = result === "SL"  ? -atrPips * 1.2 :
+                    result === "TP2" ?  atrPips * 3.0  :
+                                        atrPips * 1.8;
+        return { date:dateStr, dir, entry, sl, tp1, tp2, result,
+                 pnl_pips: Math.round(dir==="LONG" ? pnl : pnl),
+                 rsi: Math.round(rsi*10)/10, atr_pips: Math.round(atrPips) };
+      }
+
+      // Strategy 1: Full confluence (3/3)
+      if (confluence >= 3) {
+        const dir = bull ? "LONG" : "SHORT";
+        const t = simTrade(dir);
+        if (t) trades.confluence.push(t);
+      }
+
+      // Strategy 2: RSI extreme
+      if (rsiLong || rsiShort) {
+        const dir = rsiLong ? "LONG" : "SHORT";
+        const t = simTrade(dir);
+        if (t) trades.rsi_extreme.push(t);
+      }
+
+      // Strategy 3: Confluence + session
+      if (confluence >= 3 && inSession) {
+        const dir = bull ? "LONG" : "SHORT";
+        const t = simTrade(dir);
+        if (t) trades.session.push(t);
+      }
+
+      // Strategy 4: Any 2 signals
+      if (confluence >= 2) {
+        const dir = bull ? "LONG" : "SHORT";
+        const t = simTrade(dir);
+        if (t) trades.all_signals.push(t);
+      }
+
+      // Pip Ladder accuracy tracking
+      if (confluence >= 3 && i + 5 < bars.length) {
+        const dir = bull ? 1 : -1;
+        const LEVELS = [0.5, 1.0, 1.5, 2.0, 3.0];
+        LEVELS.forEach(mult => {
+          const target = entry + dir * atr * mult;
+          const key = Math.round(mult * 10);
+          if (!ladderHits[key]) ladderHits[key] = { target_mult:mult, hits:0, total:0 };
+          ladderHits[key].total++;
+          // Check next 5 bars
+          for (let j = i+1; j <= Math.min(i+5, bars.length-1); j++) {
+            const b = bars[j];
+            const reached = dir === 1 ? b.high >= target : b.low <= target;
+            if (reached) { ladderHits[key].hits++; break; }
+          }
+        });
+      }
+    }
+
+    // Compute stats
+    function stats(tradeList) {
+      if (!tradeList.length) return { trades:0, win_rate:0, avg_pnl:0, total_pnl:0, best:0, worst:0, profit_factor:0 };
+      const wins   = tradeList.filter(t => t.pnl_pips > 0);
+      const losses = tradeList.filter(t => t.pnl_pips < 0);
+      const totalPnl = tradeList.reduce((s,t) => s + t.pnl_pips, 0);
+      const grossW = wins.reduce((s,t) => s + t.pnl_pips, 0);
+      const grossL = Math.abs(losses.reduce((s,t) => s + t.pnl_pips, 0));
+      return {
+        trades:    tradeList.length,
+        wins:      wins.length,
+        losses:    losses.length,
+        win_rate:  Math.round(wins.length / tradeList.length * 100),
+        avg_pnl:   Math.round(totalPnl / tradeList.length),
+        total_pnl: Math.round(totalPnl),
+        best:      Math.round(Math.max(...tradeList.map(t=>t.pnl_pips))),
+        worst:     Math.round(Math.min(...tradeList.map(t=>t.pnl_pips))),
+        profit_factor: grossL > 0 ? Math.round(grossW/grossL*100)/100 : 999,
+        // equity curve (cumulative pnl)
+        equity: tradeList.reduce((acc, t) => {
+          acc.push((acc[acc.length-1]||0) + t.pnl_pips);
+          return acc;
+        }, []),
+        recent: tradeList.slice(-20), // last 20 trades
+      };
+    }
+
+    // Ladder accuracy
+    const ladderAccuracy = Object.entries(ladderHits)
+      .filter(([k]) => k !== "total" && k !== "hits")
+      .map(([k, v]) => ({
+        mult:  v.target_mult,
+        label: `${Math.round(v.target_mult * 100)}% ATR`,
+        hits:  v.hits,
+        total: v.total,
+        accuracy: v.total > 0 ? Math.round(v.hits/v.total*100) : 0,
+      }))
+      .sort((a,b) => a.mult - b.mult);
+
+    res.json({
+      symbol,
+      period: `${bars[200].date} → ${bars[bars.length-2].date}`,
+      bars_used: bars.length - 200,
+      stats: {
+        confluence:  stats(trades.confluence),
+        rsi_extreme: stats(trades.rsi_extreme),
+        session:     stats(trades.session),
+        all_signals: stats(trades.all_signals),
+      },
+      ladder_accuracy: ladderAccuracy,
+    });
+  } catch(e) {
+    console.error("[backtest]", symbol, e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🏦 Forex Master Pro v7 — Master Prompt v6 Edition`);
   console.log(`   Servidor   : http://localhost:${PORT}`);

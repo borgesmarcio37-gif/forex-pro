@@ -268,6 +268,9 @@ export default function App(){
   const [repErr,setRE]         = useState(null);
   const [error,setError]       = useState(null);
   const [autoR,setAutoR]       = useState(true);
+  const [btData,setBT]         = useState(null);
+  const [btLoad,setBTLoad]     = useState(false);
+  const [btPair,setBTPair]     = useState("EUR/USD");
   const [alerts,setAlerts]     = useState([]);
   const [showAlerts,setShowAlerts] = useState(false);
   const [installPrompt,setInstallPrompt] = useState(null);
@@ -320,6 +323,16 @@ export default function App(){
     }catch(e){setRE(e.message);}
     finally{setRL(false);}
   },[]);
+
+  // fetch backtest
+  const fetchBacktest = useCallback(async(sym) => {
+    setBTLoad(true); setBT(null);
+    try {
+      const d = await get(`/backtest?symbol=${encodeURIComponent(sym)}`);
+      setBT(d); setBTPair(sym);
+    } catch(e) { setError(e.message); }
+    finally { setBTLoad(false); }
+  }, []);
 
   // init
   useEffect(()=>{
@@ -396,7 +409,7 @@ export default function App(){
   const ladder   = atrPips ? computeLadder(atrPips, rsiVal, bull, macdBull, isCryptoActive) : [];
   // For crypto ladder: server already scales the levels — frontend just displays
 
-  const TABS=[["dashboard","📊 Dashboard"],["scanner","📡 Scanner"],["detail","🔍 Indicadores"],["report","🤖 Relatório IA"]];
+  const TABS=[["dashboard","📊 Dashboard"],["scanner","📡 Scanner"],["detail","🔍 Indicadores"],["report","🤖 Relatório IA"],["backtest","📈 Backtest"]];
 
   return(
     <div style={{minHeight:"100vh",background:"#03060e",color:"#8aaccc",fontFamily:"'Segoe UI',system-ui,sans-serif"}}>
@@ -736,6 +749,155 @@ export default function App(){
 
             {/* AI Report */}
             <AiReport report={report} loading={repLoad} error={repErr} onRefresh={()=>genReport(scanPair)} symbol={activePair}/>
+          </div>
+        )}
+
+
+        {/* ── BACKTEST ── */}
+        {tab==="backtest"&&(
+          <div style={{display:"grid",gap:14}}>
+            {/* Controls */}
+            <C>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
+                <div>
+                  <L t="📈 Backtest — Simulação Histórica" color="#0d9488" mb={4}/>
+                  <div style={{fontSize:11,color:"#1a5a4a"}}>SL = 1.2× ATR · TP1 = 1.8× ATR · TP2 = 3× ATR · {btData?btData.period:"500 dias de histórico"}</div>
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                  <select value={btPair} onChange={e=>{setBTPair(e.target.value);}} style={{padding:"6px 10px",borderRadius:6,border:"1px solid rgba(18,42,78,.7)",background:"rgba(4,10,22,.9)",color:"#8aaccc",fontSize:11,fontFamily:"inherit"}}>
+                    {PAIRS.map(p=><option key={p} value={p}>{p}</option>)}
+                  </select>
+                  <button onClick={()=>fetchBacktest(btPair)} disabled={btLoad} style={{padding:"7px 18px",borderRadius:7,border:"1px solid #0d9488",background:btLoad?"rgba(13,148,136,.06)":"rgba(13,148,136,.18)",color:btLoad?"#1a5040":"#0d9488",fontSize:11,cursor:btLoad?"not-allowed":"pointer",fontFamily:"inherit",fontWeight:700}}>
+                    {btLoad?<><Spin/>A calcular...</>:"▶ Executar Backtest"}
+                  </button>
+                </div>
+              </div>
+            </C>
+
+            {btLoad&&<C style={{textAlign:"center",padding:28}}><Spin/><span style={{color:"#253a5e",fontSize:13}}>A simular {btPair} em 500 dias...</span></C>}
+
+            {btData&&(()=>{
+              const strategies = [
+                {key:"confluence",  label:"🎯 Confluência 3/3",     color:"#0d9488", desc:"RSI+MACD+EMA200 alinhados"},
+                {key:"session",     label:"🕐 Confluência + Sessão", color:"#4da6ff", desc:"3/3 + dia de semana"},
+                {key:"rsi_extreme", label:"📊 RSI Extremo",          color:"#f59e0b", desc:"RSI<30 LONG ou RSI>70 SHORT"},
+                {key:"all_signals", label:"⚡ 2+ Sinais",            color:"#a78bfa", desc:"Qualquer 2 confluências"},
+              ];
+
+              return(
+                <div style={{display:"grid",gap:14}}>
+
+                  {/* Strategy comparison cards */}
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10}}>
+                    {strategies.map(s=>{
+                      const st = btData.stats[s.key];
+                      const isPos = st.total_pnl > 0;
+                      return(
+                        <C key={s.key} style={{borderColor:s.color+"44"}}>
+                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+                            <div>
+                              <div style={{fontSize:12,fontWeight:700,color:s.color}}>{s.label}</div>
+                              <div style={{fontSize:10,color:"#1a3a5e",marginTop:2}}>{s.desc}</div>
+                            </div>
+                            <div style={{textAlign:"right"}}>
+                              <div style={{fontSize:22,fontWeight:800,color:isPos?"#22c55e":"#ef4444"}}>{st.win_rate}%</div>
+                              <div style={{fontSize:10,color:"#253a5e"}}>Win Rate</div>
+                            </div>
+                          </div>
+                          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6}}>
+                            {[
+                              {l:"Trades",   v:st.trades,                          c:"#c8e0ff"},
+                              {l:"P&L Total", v:`${st.total_pnl>0?"+":""}${st.total_pnl}p`, c:isPos?"#22c55e":"#ef4444"},
+                              {l:"Profit Factor", v:st.profit_factor,             c:st.profit_factor>=1?"#22c55e":"#ef4444"},
+                              {l:"Média/Trade",v:`${st.avg_pnl>0?"+":""}${st.avg_pnl}p`,    c:st.avg_pnl>0?"#22c55e":"#ef4444"},
+                              {l:"Melhor",    v:`+${st.best}p`,                    c:"#22c55e"},
+                              {l:"Pior",      v:`${st.worst}p`,                    c:"#ef4444"},
+                            ].map(k=>(
+                              <div key={k.l} style={{textAlign:"center",padding:"8px 4px",background:"rgba(10,20,40,.5)",borderRadius:6}}>
+                                <div style={{fontSize:13,fontWeight:700,color:k.c}}>{k.v}</div>
+                                <div style={{fontSize:9,color:"#253a5e",marginTop:2}}>{k.l}</div>
+                              </div>
+                            ))}
+                          </div>
+                          {/* Win rate bar */}
+                          <div style={{marginTop:10,background:"rgba(18,42,78,.4)",borderRadius:4,height:6,overflow:"hidden"}}>
+                            <div style={{width:`${st.win_rate}%`,height:"100%",background:s.color,borderRadius:4,transition:"width 1s"}}/>
+                          </div>
+                          {/* Equity curve mini */}
+                          {st.equity?.length>1&&(()=>{
+                            const eq=st.equity; const mn=Math.min(...eq); const mx=Math.max(...eq);
+                            const range=mx-mn||1; const w=200; const h=40;
+                            const pts=eq.map((v,i)=>`${Math.round(i/(eq.length-1)*w)},${Math.round((1-(v-mn)/range)*h)}`).join(" ");
+                            const lineColor=eq[eq.length-1]>0?"#22c55e":"#ef4444";
+                            return(
+                              <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} style={{marginTop:8,display:"block"}}>
+                                <polyline points={pts} fill="none" stroke={lineColor} strokeWidth="1.5" opacity=".8"/>
+                                <line x1="0" y1={Math.round((1-(0-mn)/range)*h)} x2={w} y2={Math.round((1-(0-mn)/range)*h)} stroke="rgba(255,255,255,.1)" strokeDasharray="3 3"/>
+                              </svg>
+                            );
+                          })()}
+                        </C>
+                      );
+                    })}
+                  </div>
+
+                  {/* Pip Ladder Accuracy */}
+                  {btData.ladder_accuracy?.length>0&&(
+                    <C>
+                      <L t="🎯 Precisão da Pip Ladder — Backtested" color="#4da6ff"/>
+                      <div style={{fontSize:11,color:"#1a5a4a",marginBottom:12}}>Comparação entre probabilidades previstas e resultados reais nos {btData.bars_used} dias testados</div>
+                      <div style={{display:"grid",gap:6}}>
+                        {btData.ladder_accuracy.map((l,i)=>(
+                          <div key={i} style={{display:"flex",alignItems:"center",gap:10}}>
+                            <div style={{width:90,fontSize:11,color:"#253a5e",flexShrink:0}}>{l.label}</div>
+                            <div style={{flex:1,position:"relative",height:20,background:"rgba(18,42,78,.3)",borderRadius:4,overflow:"hidden"}}>
+                              <div style={{position:"absolute",left:0,top:0,bottom:0,width:`${l.accuracy}%`,background:l.accuracy>=60?"#22c55e":l.accuracy>=40?"#f59e0b":"#ef4444",opacity:.7,borderRadius:4}}/>
+                            </div>
+                            <div style={{width:50,fontSize:11,fontWeight:700,color:l.accuracy>=60?"#22c55e":l.accuracy>=40?"#f59e0b":"#ef4444"}}>{l.accuracy}%</div>
+                            <div style={{width:60,fontSize:10,color:"#253a5e"}}>{l.hits}/{l.total}</div>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{marginTop:10,fontSize:10,color:"#1a3a5e",lineHeight:1.7}}>
+                        * Testado com a estratégia de Confluência 3/3 · Horizonte: 5 barras após entrada
+                      </div>
+                    </C>
+                  )}
+
+                  {/* Recent trades table */}
+                  <C>
+                    <L t="📋 Últimos 20 Trades — Confluência 3/3"/>
+                    <div style={{overflowX:"auto"}}>
+                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                        <thead>
+                          <tr style={{borderBottom:"1px solid #0d2040"}}>
+                            {["Data","Dir","Entrada","SL","TP1","RSI","ATR","Resultado","P&L"].map(h=>(
+                              <th key={h} style={{padding:"6px 8px",color:"#253a5e",fontWeight:600,textAlign:"left",fontSize:10}}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(btData.stats.confluence.recent||[]).map((t,i)=>(
+                            <tr key={i} style={{borderBottom:"1px solid rgba(13,32,64,.5)",background:i%2===0?"transparent":"rgba(18,42,78,.1)"}}>
+                              <td style={{padding:"6px 8px",color:"#4a6a8a"}}>{t.date?.slice(5)}</td>
+                              <td style={{padding:"6px 8px",color:t.dir==="LONG"?"#22c55e":"#ef4444",fontWeight:700}}>{t.dir}</td>
+                              <td style={{padding:"6px 8px",color:"#c8e0ff"}}>{t.entry?.toFixed(4)}</td>
+                              <td style={{padding:"6px 8px",color:"#ef4444"}}>{t.sl?.toFixed(4)}</td>
+                              <td style={{padding:"6px 8px",color:"#22c55e"}}>{t.tp1?.toFixed(4)}</td>
+                              <td style={{padding:"6px 8px",color:t.rsi>70?"#ef4444":t.rsi<30?"#22c55e":"#f59e0b"}}>{t.rsi}</td>
+                              <td style={{padding:"6px 8px",color:"#f59e0b"}}>{t.atr_pips}p</td>
+                              <td style={{padding:"6px 8px",color:t.result==="SL"?"#ef4444":"#22c55e",fontWeight:700}}>{t.result}</td>
+                              <td style={{padding:"6px 8px",fontWeight:700,color:t.pnl_pips>0?"#22c55e":"#ef4444"}}>{t.pnl_pips>0?"+":""}{t.pnl_pips}p</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </C>
+
+                </div>
+              );
+            })()}
           </div>
         )}
 
