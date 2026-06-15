@@ -1,0 +1,470 @@
+require("dotenv").config({ path: require("path").join(__dirname, "../.env") });
+const express   = require("express");
+const cors      = require("cors");
+const axios     = require("axios");
+const NodeCache = require("node-cache");
+
+const app   = express();
+const cache = new NodeCache({ stdTTL: 300 });
+const PORT  = process.env.PORT || 3001;
+const KEY   = process.env.TWELVE_DATA_API_KEY;
+const AKEY  = process.env.ANTHROPIC_API_KEY;
+const BASE  = "https://api.twelvedata.com";
+
+app.use(cors({ origin: "*" }));
+app.use(express.json());
+
+process.on("unhandledRejection", (err) => {
+  console.error("[server] Unhandled rejection:", err?.message || err);
+});
+
+// ── RATE LIMITER + DEDUP ──────────────────────────────────────────────────────
+const inFlight = new Map();
+let lastCallTime = 0;
+
+async function td(endpoint, params) {
+  const ck = endpoint + JSON.stringify(params);
+  const hit = cache.get(ck);
+  if (hit) return hit;
+  if (inFlight.has(ck)) {
+    console.log(`  [dedup] ${params.symbol||""}`);
+    return inFlight.get(ck);
+  }
+  const promise = (async () => {
+    const wait = Math.max(0, lastCallTime + 1000 - Date.now());
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    lastCallTime = Date.now();
+    console.log(`  [API] ${endpoint} ${params.symbol||""}`);
+    try {
+      const { data } = await axios.get(`${BASE}${endpoint}`, {
+        params: { ...params, apikey: KEY }, timeout: 15000,
+      });
+      if (data.status === "error") throw new Error(data.message);
+      cache.set(ck, data);
+      return data;
+    } catch (err) {
+      if (err.response?.status === 429) {
+        console.warn(`  [429] ${params.symbol||""} — waiting 61s...`);
+        await new Promise(r => setTimeout(r, 61000));
+        lastCallTime = Date.now();
+        const { data } = await axios.get(`${BASE}${endpoint}`, {
+          params: { ...params, apikey: KEY }, timeout: 15000,
+        });
+        if (data.status === "error") throw new Error(data.message);
+        cache.set(ck, data);
+        return data;
+      }
+      throw err;
+    }
+  })();
+  inFlight.set(ck, promise);
+  promise.finally(() => inFlight.delete(ck));
+  return promise;
+}
+
+// ── MATH HELPERS ──────────────────────────────────────────────────────────────
+function calcEMA(arr, period) {
+  const n = Math.min(period, arr.length);
+  const k = 2 / (n + 1);
+  let v = arr.slice(0, n).reduce((s, x) => s + x, 0) / n;
+  for (let i = n; i < arr.length; i++) v = arr[i] * k + v * (1 - k);
+  return v;
+}
+function calcATR(closes, highs, lows, period = 14) {
+  let sum = 0, n = Math.min(period, closes.length - 1);
+  for (let i = 1; i <= n; i++)
+    sum += Math.max(highs[i]-lows[i], Math.abs(highs[i]-closes[i-1]), Math.abs(lows[i]-closes[i-1]));
+  return sum / n;
+}
+function calcRSI(closes, period = 14) {
+  if (closes.length < period + 1) return 50;
+  let g = 0, l = 0;
+  for (let i = 1; i <= period; i++) { const d = closes[i]-closes[i-1]; d>0?g+=d:l-=d; }
+  let ag = g/period, al = l/period;
+  for (let i = period+1; i < closes.length; i++) {
+    const d = closes[i]-closes[i-1];
+    ag = (ag*(period-1)+Math.max(d,0))/period;
+    al = (al*(period-1)+Math.max(-d,0))/period;
+  }
+  return al===0?100:100-100/(1+ag/al);
+}
+function calcMACD(closes) {
+  if (closes.length < 26) return { macd:0, signal:0, hist:0 };
+  const series = [];
+  for (let i = 26; i <= closes.length; i++)
+    series.push(calcEMA(closes.slice(0,i),12) - calcEMA(closes.slice(0,i),26));
+  const macdLine = series[series.length-1];
+  const sigLine  = series.length >= 9 ? calcEMA(series, 9) : macdLine;
+  return { macd: macdLine, signal: sigLine, hist: macdLine - sigLine };
+}
+function parseCandles(values) {
+  const rev = [...values].reverse();
+  return {
+    closes: rev.map(v => parseFloat(v.close)),
+    highs:  rev.map(v => parseFloat(v.high)),
+    lows:   rev.map(v => parseFloat(v.low)),
+    raw:    rev,
+  };
+}
+
+// ── SESSIONS ──────────────────────────────────────────────────────────────────
+const SESSIONS = {
+  "EUR/USD": { best:["Londres 07h–10h","NY AM 13h30–16h"],   avoid:"Asiática (00h–07h)",  notes:"Máxima liquidez na sobreposição Londres/NY" },
+  "GBP/USD": { best:["Londres 07h–10h","NY AM 13h30–16h"],   avoid:"Asiática (00h–07h)",  notes:"Spreads mais baixos na abertura de Londres" },
+  "USD/JPY": { best:["Asiática 00h–07h","Londres 08h–10h"],  avoid:"NY tarde (18h–22h)",  notes:"Maior volatilidade na sessão de Tokyo (01h Lisboa)" },
+  "USD/CHF": { best:["Londres 08h–11h","NY AM 13h30–16h"],   avoid:"Asiática (00h–06h)",  notes:"Activo na sobreposição europeia" },
+  "AUD/USD": { best:["Asiática 00h–07h","Sydney 23h–01h"],   avoid:"NY tarde (18h–22h)",  notes:"Par asiático — activo quando Tokyo e Sydney abrem" },
+  "USD/CAD": { best:["NY AM 13h30–17h"],                     avoid:"Asiática e madrugada", notes:"Par norte-americano — máxima liquidez em NY" },
+  "EUR/GBP": { best:["Londres 07h–11h"],                     avoid:"Fora da Europa (18h–07h)", notes:"Exclusivamente europeu — inactivo fora de Londres" },
+  "EUR/JPY": { best:["Sobreposição 07h–09h","Asiática 02h–06h"], avoid:"NY tarde", notes:"Activo na sobreposição Europa/Ásia" },
+  // Crypto — 24/7, but high-volume windows exist
+  "BTC/USD": { best:["Londres 07h–10h","NY AM 13h30–16h","Qualquer hora"], avoid:"Fins de semana à noite (liquidez baixa)", notes:"Cripto 24/7 — maior volume nos horários de sobreposição forex" },
+  "ETH/USD": { best:["Londres 07h–10h","NY AM 13h30–16h","Qualquer hora"], avoid:"Fins de semana à noite (liquidez baixa)", notes:"Cripto 24/7 — segue o padrão do BTC em termos de liquidez" },
+  "SOL/USD": { best:["NY AM 13h30–16h","Qualquer hora"], avoid:"Fins de semana à noite (liquidez baixa)", notes:"Cripto 24/7 — maior volatilidade durante horário americano" },
+};
+
+function getSessionInfo(symbol) {
+  const sess = SESSIONS[symbol] || SESSIONS["EUR/USD"];
+  const now  = new Date();
+  const h    = now.getUTCHours() + (now.getUTCMonth()>=3&&now.getUTCMonth()<=9?1:0);
+  const cur  = h>=0&&h<7?"Asiática":h>=7&&h<10?"Killzone Londres":h>=10&&h<13?"Londres tarde":h>=13&&h<16?"Killzone NY AM":h>=16&&h<18?"NY tarde":"Fora de sessão principal";
+  const ideal= sess.best.some(s=>s.toLowerCase().includes(h<7?"asiática":h<10?"londres":h<16?"ny":"fora"));
+  const next = ideal?`Agora (${cur})`:h<7?`Hoje às 07h00 Lisboa (Killzone Londres)`:h<13?`Hoje às 13h30 Lisboa (Killzone NY AM)`:`Amanhã às 07h00 Lisboa (Killzone Londres)`;
+  return { sess, cur, ideal, next, h };
+}
+
+// ── ROUTES ────────────────────────────────────────────────────────────────────
+app.get("/api/health", (_req, res) =>
+  res.json({ status:"ok", key_set:!!KEY, ai_key:!!AKEY,
+    cache_keys:cache.keys().length, time:new Date().toISOString() })
+);
+app.get("/api/test", async (_req, res) => {
+  try { const d = await td("/quote",{symbol:"EUR/USD"}); res.json({ok:true,eur_usd:d.close}); }
+  catch(e) { res.status(500).json({ok:false,error:e.message}); }
+});
+app.get("/api/indicators", async (req, res) => {
+  const { symbol="EUR/USD", interval="1day" } = req.query;
+  try {
+    const d = await td("/time_series",{symbol,interval,outputsize:60});
+    const {closes,highs,lows,raw} = parseCandles(d.values);
+    const isJpy = symbol.includes("JPY");
+    const atr   = calcATR(closes,highs,lows);
+    res.json({ symbol,interval,rsi:calcRSI(closes),macd:calcMACD(closes),atr,
+      ema50:calcEMA(closes,50),ema200:calcEMA(closes,Math.min(200,closes.length)),
+      price:closes[closes.length-1],change_pct:((closes[closes.length-1]-closes[closes.length-2])/closes[closes.length-2])*100,
+      high:parseFloat(raw[raw.length-1].high),low:parseFloat(raw[raw.length-1].low) });
+  } catch(e) { console.error(`[indicators] ${symbol}:`,e.message); res.status(500).json({error:e.message}); }
+});
+app.get("/api/candles", async (req, res) => {
+  const {symbol="EUR/USD",interval="1day",outputsize=60} = req.query;
+  try {
+    const d = await td("/time_series",{symbol,interval,outputsize});
+    const {raw} = parseCandles(d.values);
+    res.json({symbol,interval,candles:raw.map(v=>({datetime:v.datetime,open:parseFloat(v.open),high:parseFloat(v.high),low:parseFloat(v.low),close:parseFloat(v.close)}))});
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+app.get("/api/quote", async (req, res) => {
+  const {symbol="EUR/USD"} = req.query;
+  try {
+    const d = await td("/time_series",{symbol,interval:"1day",outputsize:60});
+    const {closes,raw} = parseCandles(d.values);
+    const price=closes[closes.length-1],prev=closes[closes.length-2];
+    res.json({symbol,price,open:parseFloat(raw[0].open),high:parseFloat(raw[raw.length-1].high),low:parseFloat(raw[raw.length-1].low),change:price-prev,change_pct:((price-prev)/prev)*100});
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+let scanLock = false;
+app.get("/api/scan", async (req, res) => {
+  if (scanLock) {
+    console.log("[scan] Skipping — already in progress");
+    return res.status(429).json({ error:"Scan in progress" });
+  }
+  scanLock = true;
+  const PAIRS=["EUR/USD","GBP/USD","USD/JPY","USD/CHF","AUD/USD","USD/CAD","EUR/GBP","EUR/JPY","BTC/USD","ETH/USD","SOL/USD"];
+  const TIER1=["EUR/USD","GBP/USD","USD/JPY","USD/CHF"];
+  const CRYPTO=["BTC/USD","ETH/USD","SOL/USD"];
+  const results=[];
+  console.log(`\n[scan] Starting ${PAIRS.length} pairs`);
+  for (const symbol of PAIRS) {
+    try {
+      const d = await td("/time_series",{symbol,interval:"1day",outputsize:60});
+      const {closes,highs,lows,raw} = parseCandles(d.values);
+      const isJpy=symbol.includes("JPY");
+      const isCrypto=["BTC/USD","ETH/USD","SOL/USD"].includes(symbol);
+      const atrVal=calcATR(closes,highs,lows);
+      // Crypto: show ATR in USD (not pips), Forex: pips
+      const atrPips=isCrypto?Math.round(atrVal):Math.round(atrVal*(isJpy?100:10000));
+      const ema50v=calcEMA(closes,50),ema200v=calcEMA(closes,Math.min(200,closes.length));
+      const price=closes[closes.length-1],prev=closes[closes.length-2],today=raw[raw.length-1];
+      const rsiVal=calcRSI(closes),macdVal=calcMACD(closes);
+      const {ideal,cur} = getSessionInfo(symbol);
+      results.push({symbol,price,change_pct:((price-prev)/prev)*100,
+        high:parseFloat(today.high),low:parseFloat(today.low),
+        atr_pips:atrPips,atr_raw:atrVal,rsi:rsiVal,macd:macdVal,
+        ema50:ema50v,ema200:ema200v,trend:price>ema200v?"bull":"bear",
+        tier:TIER1.includes(symbol)?1:isCrypto?"crypto":2,
+        is_crypto:isCrypto,
+        ideal_session:ideal});
+      console.log(`  ✓ ${symbol.padEnd(7)} ${price.toFixed(isJpy?2:4).padEnd(10)} ATR=${isCrypto?"$":""}${String(atrPips).padEnd(4)}${isCrypto?"":"p"} RSI=${rsiVal.toFixed(1)} ${ideal?"✅":"⏳"}`);
+    } catch(e) { console.error(`  ✗ ${symbol}:`,e.message); }
+  }
+  scanInProgress = false;
+  scanLock = false;
+  console.log(`[scan] Done: ${results.length}/${PAIRS.length}\n`);
+  res.json({pairs:results.sort((a,b)=>b.atr_pips-a.atr_pips),scanned_at:new Date().toISOString()});
+});
+
+// ── ALERTS ENGINE ─────────────────────────────────────────────────────────────
+// Stores active alerts and their triggered state
+const alertsStore = {
+  rules: [], // user-defined alert rules
+  triggered: [], // alerts that fired
+};
+
+// Check alerts against current scan data
+function checkAlerts(pairs) {
+  const now = new Date().toISOString();
+  pairs.forEach(p => {
+    const {symbol,rsi,atr_pips,trend,macd,ideal_session} = p;
+    const bull = trend === "bull";
+    const macdBull = (macd?.hist||0) > 0;
+    const confluence = (bull?1:0) + (macdBull?1:0) + ((rsi>50&&bull)||(rsi<50&&!bull)?1:0);
+
+    // Auto-alert conditions
+    const conditions = [
+      { id:`${symbol}_oversold`,    label:`${symbol} sobrevendido`, msg:`RSI ${rsi.toFixed(1)} — possível reversão LONG`,  active: rsi < 32 },
+      { id:`${symbol}_overbought`,  label:`${symbol} sobrecomprado`,msg:`RSI ${rsi.toFixed(1)} — possível reversão SHORT`, active: rsi > 68 },
+      { id:`${symbol}_confluence`,  label:`${symbol} confluência ✅`,msg:`${confluence}/3 sinais · ATR ${atr_pips}p · ${trend==="bull"?"Bullish":"Bearish"}`, active: confluence >= 3 },
+      { id:`${symbol}_ideal_window`,label:`${symbol} janela ideal 🕐`,msg:`Sessão ideal activa agora — ${trend==="bull"?"Bullish":"Bearish"}`, active: ideal_session && confluence >= 2 },
+    ];
+
+    conditions.forEach(c => {
+      if (c.active) {
+        const existing = alertsStore.triggered.find(t => t.id === c.id);
+        if (!existing) {
+          const alert = { id:c.id, symbol, label:c.label, msg:c.msg, time:now, read:false };
+          alertsStore.triggered.unshift(alert);
+          if (alertsStore.triggered.length > 50) alertsStore.triggered.pop();
+          console.log(`  🔔 ALERTA: ${c.label} — ${c.msg}`);
+        }
+      } else {
+        // Reset so it can fire again if condition re-activates
+        alertsStore.triggered = alertsStore.triggered.filter(t => t.id !== c.id);
+      }
+    });
+  });
+}
+
+app.get("/api/alerts", (_req, res) => {
+  res.json({ alerts: alertsStore.triggered, count: alertsStore.triggered.filter(a=>!a.read).length });
+});
+app.post("/api/alerts/read", (req, res) => {
+  const { id } = req.body;
+  if (id === "all") alertsStore.triggered.forEach(a => a.read = true);
+  else { const a = alertsStore.triggered.find(t=>t.id===id); if(a) a.read=true; }
+  res.json({ ok: true });
+});
+
+// ── MASTER PROMPT v6 REPORT ───────────────────────────────────────────────────
+app.post("/api/report", async (req, res) => {
+  if (!AKEY) return res.status(400).json({error:"ANTHROPIC_API_KEY não configurada no .env"});
+  const {symbol,price,change_pct,high,low,atr_pips,rsi,macd,ema50,ema200,trend} = req.body;
+  const bull=trend==="bull", mb=(macd?.hist||0)>0;
+  const f4=n=>(typeof n==="number"?n.toFixed(4):"—");
+  const f2=n=>(typeof n==="number"?n.toFixed(2):"—");
+  const isJpy=symbol.includes("JPY");
+  const isCrypto=["BTC/USD","ETH/USD","SOL/USD"].includes(symbol);
+  const atrUnit=isCrypto?"USD":"pips";
+  // For crypto: use USD levels scaled to ATR. For forex: use pip levels.
+  const PIPS = isCrypto
+    ? [Math.round(atr_pips*0.2), Math.round(atr_pips*0.5), Math.round(atr_pips*0.8),
+       Math.round(atr_pips*1.0), Math.round(atr_pips*1.5), Math.round(atr_pips*2.0),
+       Math.round(atr_pips*3.0), Math.round(atr_pips*4.0), Math.round(atr_pips*5.0), Math.round(atr_pips*7.0)]
+    : [50,100,150,200,250,300,350,400,450,500];
+  const confluence=(bull?1:0)+(mb?1:0)+((rsi>50&&bull)||(rsi<50&&!bull)?1:0);
+  const m=confluence;
+  const ladder=PIPS.map(p=>({pips:p,prob:Math.min(97,Math.max(3,Math.round(100*Math.exp(-0.55*p/Math.max(atr_pips,1)))+m*4))}));
+  const {sess,cur,ideal,next} = getSessionInfo(symbol);
+
+  // Price levels for S/R estimation
+  const slPips = Math.round(atr_pips * 1.2);
+  const slPrice = bull ? (price - slPips*(isJpy?0.01:0.0001)).toFixed(isJpy?2:4) : (price + slPips*(isJpy?0.01:0.0001)).toFixed(isJpy?2:4);
+  const tp1Pips = Math.round(atr_pips * 0.8);
+  const tp2Pips = Math.round(atr_pips * 1.8);
+  const tp3Pips = Math.round(atr_pips * 3.0);
+  const dir = bull ? 1 : -1;
+  const pip = isJpy ? 0.01 : 0.0001;
+  const tp1 = (price + dir*tp1Pips*pip).toFixed(isJpy?2:4);
+  const tp2 = (price + dir*tp2Pips*pip).toFixed(isJpy?2:4);
+  const tp3 = (price + dir*tp3Pips*pip).toFixed(isJpy?2:4);
+
+  const prompt = `És um analista de forex profissional sénior. Analisa ${symbol} com dados reais e devolve APENAS JSON válido.
+
+═══════════════════════════════════════════════════════
+DADOS DE MERCADO REAIS (${new Date().toLocaleString("pt-PT")})
+═══════════════════════════════════════════════════════
+Par: ${symbol} | Preço: ${f4(price)} | Variação: ${f2(change_pct)}%
+High/Low: ${f4(high)} / ${f4(low)} | ATR(14): ${atr_pips} pips
+RSI(14): ${rsi?.toFixed(1)} ${rsi>70?"⚠️ SOBRECOMPRADO":rsi<30?"⚠️ SOBREVENDIDO":""}
+MACD histograma: ${(macd?.hist||0).toFixed(5)} (${mb?"Bullish ✓":"Bearish ✗"})
+EMA50: ${f4(ema50)} | EMA200: ${f4(ema200)}
+Preço vs EMA50:  ${bull&&price>ema50?"ACIMA ✓":"ABAIXO ✗"}
+Preço vs EMA200: ${bull&&price>ema200?"ACIMA ✓":"ABAIXO ✗"} → Tendência ${bull?"BULLISH":"BEARISH"}
+Confluência técnica: ${confluence}/3 sinais alinhados
+
+═══════════════════════════════════════════════════════
+ANÁLISE DE SESSÃO
+═══════════════════════════════════════════════════════
+Sessão actual: ${cur} ${ideal?"✅ JANELA IDEAL":"⚠️ FORA DA JANELA"}
+Melhores janelas para ${symbol}: ${sess.best.join(" | ")}
+Evitar: ${sess.avoid}
+Nota: ${sess.notes}
+Próxima janela ideal: ${next}
+
+═══════════════════════════════════════════════════════
+ANÁLISE INSTITUCIONAL (inferida dos dados técnicos)
+═══════════════════════════════════════════════════════
+COT inferido: ${bull&&rsi<60?"Large Speculators provavelmente LONG":!bull&&rsi>40?"Large Speculators provavelmente SHORT":"Posicionamento neutro/indefinido"}
+Order Block estimado: ${bull?`Zona de suporte ${f4(ema50)} (EMA50) — possível OB bullish`:`Zona de resistência ${f4(ema50)} (EMA50) — possível OB bearish`}
+Fair Value Gap: ${Math.abs(price-parseFloat(ema50||0))>atr_pips*0.0001?`Desequilíbrio entre preço e EMA50 — zona de FVG potencial`:"Preço próximo das médias — sem FVG evidente"}
+Liquidez: Máximos recentes ${f4(high)} e mínimos ${f4(low)} são alvos de liquidez institucionais
+Stop Hunt risk: ${rsi>65||rsi<35?"⚠️ ELEVADO — RSI extremo atrai stops":"Baixo — RSI em zona neutra"}
+Killzone activa: ${ideal?"✅ SIM — melhor momento para executar":"❌ NÃO — aguardar próxima janela"}
+
+═══════════════════════════════════════════════════════
+PIP PROBABILITY LADDER (50–500 pips)
+═══════════════════════════════════════════════════════
+${ladder.map(l=>`+${l.pips}p: ${l.prob}% ${l.prob>=80?"🟢 Quase certo":l.prob>=60?"🟢 Alta":l.prob>=40?"🟡 Moderada":l.prob>=20?"🟠 Baixa":"🔴 Improvável"}`).join("\n")}
+
+═══════════════════════════════════════════════════════
+REFERÊNCIA DE NÍVEIS (usa como base, ajusta à estrutura técnica)
+═══════════════════════════════════════════════════════
+Direcção sugerida: ${bull?"LONG 📈":"SHORT 📉"}
+ATR(14): ${atr_pips} ${isCrypto?"USD":"pips"} — usa para calibrar SL e TPs
+SL sugerido: ${bull?"abaixo":"acima"} do último swing ${bull?"low":"high"} / Order Block
+
+INSTRUÇÃO: Com base em TODOS os dados acima, devolve este JSON exacto:
+{
+  "recommendation": "RECOMENDADO" ou "NAO_RECOMENDADO",
+  "direction": "LONG" ou "SHORT" ou null,
+  "confidence": número 0-100,
+  "verdict": "1-2 frases directas — mencionar confluência e sessão",
+  "summary": "3-4 frases análise técnica completa com EMAs, RSI, MACD e momentum",
+  "session_analysis": {
+    "current_session": "${cur}",
+    "is_ideal": ${ideal},
+    "best_windows": ${JSON.stringify(sess.best)},
+    "avoid": "${sess.avoid}",
+    "notes": "${sess.notes}",
+    "recommendation": "instrução clara: quando e como entrar com hora Lisboa",
+    "next_ideal_window": "${next}"
+  },
+  "institutional": {
+    "available": false,
+    "bias": "Bullish" ou "Bearish" ou "Neutro",
+    "cot_inference": "o que o posicionamento dos grandes players provavelmente indica",
+    "order_block": "zona de OB identificada e relevância",
+    "fvg": "Fair Value Gap — existe ou não, e onde",
+    "stop_hunt_risk": "probabilidade de stop hunt antes da entrada",
+    "notes": "síntese do posicionamento institucional inferido"
+  },
+  "volume_analysis": {
+    "relative": "Alto" ou "Médio" ou "Baixo",
+    "trend": "texto",
+    "notes": "nota sobre volume e liquidez nesta sessão"
+  },
+  "entry": {
+    "zone": "preço ou zona exacta de entrada",
+    "type": "LIMIT" ou "MARKET",
+    "condition": "condição técnica para entrar — ex: aguardar pullback para EMA50",
+    "notes": "entrar APENAS na Killzone ${sess.best[0]}"
+  },
+  "stop_loss": { "price": "calcula baseado em estrutura técnica", "pips": 0, "logic": "justificação do SL" },
+  "take_profits": [
+    {"level": 1, "price": "calcula", "pips": 0, "close_pct": 50, "target": "TP conservador"},
+    {"level": 2, "price": "calcula", "pips": 0, "close_pct": 30, "target": "TP principal"},
+    {"level": 3, "price": "calcula", "pips": 0, "close_pct": 20, "target": "TP estendido"}
+  ],
+  "risk_reward": "R/B calculado para TP2",
+  "risks": [
+    "risco técnico principal",
+    "risco de sessão/liquidez",
+    "risco macro ou evento externo"
+  ],
+  "checklist": [
+    "✅ ou ❌ Confluência ≥3 sinais",
+    "✅ ou ❌ Sessão ideal activa",
+    "✅ ou ❌ RSI não em extremo contrário",
+    "✅ ou ❌ SL além de estrutura lógica",
+    "✅ ou ❌ Sem evento macro ≤4h"
+  ],
+  "pip_ladder": ${JSON.stringify(ladder)}
+}
+Regras: RECOMENDADO apenas se ≥3 confluências. Português europeu. Zero texto fora do JSON.`;
+
+  try {
+    const {data} = await axios.post("https://api.anthropic.com/v1/messages",
+      {model:"claude-sonnet-4-20250514",max_tokens:1500,
+       system:"Analista forex sénior com Master Prompt v6. Responde APENAS JSON válido, sem markdown.",
+       messages:[{role:"user",content:prompt}]},
+      {headers:{"x-api-key":AKEY,"anthropic-version":"2023-06-01","Content-Type":"application/json"},timeout:35000}
+    );
+    const raw=data.content?.find(b=>b.type==="text")?.text||"{}";
+    const cleaned = raw.replace(/```json|```/g,"").trim();
+    // Extract only the first complete JSON object — ignore any trailing text/numbers
+    let jsonStr = null;
+    let depth = 0, start = cleaned.indexOf('{');
+    if (start >= 0) {
+      for (let i = start; i < cleaned.length; i++) {
+        if (cleaned[i]==='{') depth++;
+        else if (cleaned[i]==='}') { depth--; if(depth===0){ jsonStr=cleaned.slice(start,i+1); break; } }
+      }
+    }
+    if(!jsonStr) throw new Error("JSON inválido na resposta IA");
+    const result = JSON.parse(jsonStr);
+    // Sanitise risk_reward — extract only "1:X.X" pattern
+    if(result.risk_reward) {
+      const m = String(result.risk_reward).match(/1:[\d.]+/);
+      result.risk_reward = m ? m[0] : null;
+    }
+    // Ensure stop_loss.price and take_profit prices are strings, not numbers
+    if(result.stop_loss?.price) result.stop_loss.price = String(result.stop_loss.price);
+    if(result.take_profits) result.take_profits = result.take_profits.map(tp=>({...tp, price:String(tp.price||"—")}));
+    // Check alerts after report
+    if (req.body.scanPairs) checkAlerts(req.body.scanPairs);
+    res.json(result);
+  } catch(e) { console.error("[report]",e.message); res.status(500).json({error:e.message}); }
+});
+
+// Auto-check alerts every 10 min using cached scan data (avoid double scans)
+setInterval(async () => {
+  try {
+    const PAIRS=["EUR/USD","GBP/USD","USD/JPY","USD/CHF","AUD/USD","USD/CAD","EUR/GBP","EUR/JPY"];
+    const pairs = [];
+    for (const symbol of PAIRS) {
+      const ck = "/time_series" + JSON.stringify({symbol,interval:"1day",outputsize:60});
+      const cached = cache.get(ck);
+      if (cached) {
+        const {closes,highs,lows} = parseCandles(cached.values);
+        const atrVal=calcATR(closes,highs,lows);
+        const isJpy=symbol.includes("JPY");
+        const ema200v=calcEMA(closes,Math.min(200,closes.length));
+        const price=closes[closes.length-1];
+        const {ideal}=getSessionInfo(symbol);
+        pairs.push({symbol,price,rsi:calcRSI(closes),macd:calcMACD(closes),
+          atr_pips:Math.round(atrVal*(isJpy?100:10000)),
+          trend:price>ema200v?"bull":"bear",ideal_session:ideal});
+      }
+    }
+    if (pairs.length > 0) checkAlerts(pairs);
+  } catch(e) { /* silent */ }
+}, 5 * 60 * 1000);
+
+app.listen(PORT, () => {
+  console.log(`\n🏦 Forex Master Pro v7 — Master Prompt v6 Edition`);
+  console.log(`   Servidor   : http://localhost:${PORT}`);
+  console.log(`   Twelve Data: ${KEY?"✅ configurada":"❌ FALTA no .env"}`);
+  console.log(`   Anthropic  : ${AKEY?"✅ configurada":"⚠️  não configurada"}`);
+  console.log(`   Prompt     : Master Prompt v6 (COT·OB·FVG·Killzones·Ladder)`);
+  console.log(`   Alertas    : ✅ activos (RSI extremo·confluência·janela ideal)`);
+  console.log(`   Rate limit : 1s · cache 5min · dedup activo · crash guard\n`);
+});

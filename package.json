@@ -1,0 +1,68 @@
+{
+  "name": "forex-pro-server",
+  "version": "1.0.0",
+  "description": "Forex Pro \u2014 servidor local com Twelve Data API",
+  "main": "electron.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "nodemon server/index.js",
+    "setup": "npm install && cd client && npm install",
+    "build": "cd client && npm run build",
+    "electron": "npm run build && electron .",
+    "all": "concurrently \"npm run dev\" \"cd client && npm start\"",
+    "electron:dev": "electron .",
+    "electron:build": "npm run build && electron-builder --win --x64",
+    "electron:pack": "npm run build && electron-builder --dir"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "node-cache": "^5.1.2"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "electron": "^28.0.0",
+    "nodemon": "^3.0.2",
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId": "com.forexmasterpro.v7",
+    "productName": "Forex Master Pro",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "electron.js",
+      "server/**/*",
+      "client/build/**/*",
+      "node_modules/**/*",
+      ".env",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "client/public/favicon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "client/public/favicon.ico",
+      "shortcutName": "Forex Master Pro"
+    },
+    "extraResources": [
+      {
+        "from": ".env",
+        "to": ".env"
+      }
+    ]
+  }
+}

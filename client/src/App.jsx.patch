@@ -1,0 +1,2 @@
+# patch notes — spread field already handled by server response
+# App.jsx will receive spread, bid, ask in scanData and pass to genReport
