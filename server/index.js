@@ -145,12 +145,12 @@ app.get("/api/test", async (_req, res) => {
 app.get("/api/indicators", async (req, res) => {
   const { symbol="EUR/USD", interval="1day" } = req.query;
   try {
-    const d = await td("/time_series",{symbol,interval,outputsize:60});
+    const d = await td("/time_series",{symbol,interval,outputsize:500});
     const {closes,highs,lows,raw} = parseCandles(d.values);
     const isJpy = symbol.includes("JPY");
     const atr   = calcATR(closes,highs,lows);
     res.json({ symbol,interval,rsi:calcRSI(closes),macd:calcMACD(closes),atr,
-      ema50:calcEMA(closes,50),ema200:calcEMA(closes,Math.min(200,closes.length)),
+      ema50:calcEMA(closes,50),ema200:calcEMA(closes,200),
       price:closes[closes.length-1],change_pct:((closes[closes.length-1]-closes[closes.length-2])/closes[closes.length-2])*100,
       high:parseFloat(raw[raw.length-1].high),low:parseFloat(raw[raw.length-1].low) });
   } catch(e) { console.error(`[indicators] ${symbol}:`,e.message); res.status(500).json({error:e.message}); }
@@ -166,7 +166,7 @@ app.get("/api/candles", async (req, res) => {
 app.get("/api/quote", async (req, res) => {
   const {symbol="EUR/USD"} = req.query;
   try {
-    const d = await td("/time_series",{symbol,interval:"1day",outputsize:60});
+    const d = await td("/time_series",{symbol,interval:"1day",outputsize:500});
     const {closes,raw} = parseCandles(d.values);
     const price=closes[closes.length-1],prev=closes[closes.length-2];
     res.json({symbol,price,open:parseFloat(raw[0].open),high:parseFloat(raw[raw.length-1].high),low:parseFloat(raw[raw.length-1].low),change:price-prev,change_pct:((price-prev)/prev)*100});
@@ -186,14 +186,14 @@ app.get("/api/scan", async (req, res) => {
   console.log(`\n[scan] Starting ${PAIRS.length} pairs`);
   for (const symbol of PAIRS) {
     try {
-      const d = await td("/time_series",{symbol,interval:"1day",outputsize:60});
+      const d = await td("/time_series",{symbol,interval:"1day",outputsize:500});
       const {closes,highs,lows,raw} = parseCandles(d.values);
       const isJpy=symbol.includes("JPY");
       const isCrypto=["BTC/USD","ETH/USD","SOL/USD"].includes(symbol);
       const atrVal=calcATR(closes,highs,lows);
       // Crypto: show ATR in USD (not pips), Forex: pips
       const atrPips=isCrypto?Math.round(atrVal):Math.round(atrVal*(isJpy?100:10000));
-      const ema50v=calcEMA(closes,50),ema200v=calcEMA(closes,Math.min(200,closes.length));
+      const ema50v=calcEMA(closes,50),ema200v=calcEMA(closes,200);
       const price=closes[closes.length-1],prev=closes[closes.length-2],today=raw[raw.length-1];
       const rsiVal=calcRSI(closes),macdVal=calcMACD(closes);
       const {ideal,cur} = getSessionInfo(symbol);
@@ -429,6 +429,13 @@ Regras: RECOMENDADO apenas se ≥3 confluências. Português europeu. Zero texto
     // Ensure stop_loss.price and take_profit prices are strings, not numbers
     if(result.stop_loss?.price) result.stop_loss.price = String(result.stop_loss.price);
     if(result.take_profits) result.take_profits = result.take_profits.map(tp=>({...tp, price:String(tp.price||"—")}));
+    // Remove any numeric top-level fields that could render as stray text
+    // (sometimes AI returns extra fields not in the schema)
+    const ALLOWED = ["recommendation","direction","confidence","verdict","summary",
+      "session_analysis","volume_analysis","institutional","entry","stop_loss",
+      "take_profits","risks","checklist","risk_reward","pip_ladder"];
+    Object.keys(result).forEach(k => { if(!ALLOWED.includes(k)) { console.log(`[report] Removing extra field: ${k} =`, result[k]); delete result[k]; } });
+    console.log("[report] risk_reward:", result.risk_reward);
     // Check alerts after report
     if (req.body.scanPairs) checkAlerts(req.body.scanPairs);
     res.json(result);
@@ -441,13 +448,13 @@ setInterval(async () => {
     const PAIRS=["EUR/USD","GBP/USD","USD/JPY","USD/CHF","AUD/USD","USD/CAD","EUR/GBP","EUR/JPY"];
     const pairs = [];
     for (const symbol of PAIRS) {
-      const ck = "/time_series" + JSON.stringify({symbol,interval:"1day",outputsize:60});
+      const ck = "/time_series" + JSON.stringify({symbol,interval:"1day",outputsize:500});
       const cached = cache.get(ck);
       if (cached) {
         const {closes,highs,lows} = parseCandles(cached.values);
         const atrVal=calcATR(closes,highs,lows);
         const isJpy=symbol.includes("JPY");
-        const ema200v=calcEMA(closes,Math.min(200,closes.length));
+        const ema200v=calcEMA(closes,200);
         const price=closes[closes.length-1];
         const {ideal}=getSessionInfo(symbol);
         pairs.push({symbol,price,rsi:calcRSI(closes),macd:calcMACD(closes),
