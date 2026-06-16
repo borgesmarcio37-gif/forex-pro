@@ -252,6 +252,9 @@ function AiReport({report,loading,error,onRefresh,symbol}){
 }
 
 // ── MAIN ──────────────────────────────────────────────────────────────────────
+// Module-level flag — survives React double-mount in dev mode
+let _appInitialized = false;
+
 export default function App(){
   const [tab,setTab]           = useState("dashboard");
   const [activePair,setAP]     = useState("EUR/USD");
@@ -276,18 +279,24 @@ export default function App(){
   const [installPrompt,setInstallPrompt] = useState(null);
   const [installed,setInstalled] = useState(false);
   const timerRef               = useRef(null);
+  const scanDataRef            = useRef([]);
 
   // sequential scan
   const doScan = useCallback(async(silent=false)=>{
     if(!silent) setScanning(true);
     try{
       const data = await get("/scan");
-      setScan(data.pairs || []);
-      setUpdated(new Date());
+      // Only update if we got valid data — prevents flicker on failed refresh
+      if(data.pairs && data.pairs.length > 0) {
+        setScan(data.pairs);
+        scanDataRef.current = data.pairs;
+        setUpdated(new Date());
+      }
       // Check alerts after scan
       try{ const al=await get("/alerts"); setAlerts(al.alerts||[]); }catch{}
     }catch(e){
-      setError(e.message);
+      // Silent refresh failures don't show error — just keep existing data
+      if(!silent) setError(e.message);
     }finally{
       if(!silent) setScanning(false);
     }
@@ -298,7 +307,7 @@ export default function App(){
     setLP(true); setError(null);
     try{
       // Use scan data for quote if available (zero extra API calls)
-      const sp = scanData.find(x => x.symbol === sym);
+      const sp = scanDataRef.current.find(x => x.symbol === sym);
       if(sp){
         setQuote({ symbol:sym, price:sp.price, open:sp.price,
           high:sp.high, low:sp.low, change_pct:sp.change_pct, change:0 });
@@ -310,7 +319,7 @@ export default function App(){
       setCandles(c.candles.slice().reverse().map(v=>({date:v.datetime.slice(5,10),close:v.close,high:v.high,low:v.low})));
     }catch(e){setError(e.message);}
     finally{setLP(false);}
-  },[scanData]);
+  },[]);
 
   // generate AI report via server proxy
   const genReport = useCallback(async(pairData)=>{
@@ -336,6 +345,8 @@ export default function App(){
 
   // init
   useEffect(()=>{
+    if(_appInitialized) return; // module-level guard — survives double-mount
+    _appInitialized = true;
     get("/health").then(setHealth).catch(()=>{});
     doScan();
     // PWA install prompt
@@ -364,20 +375,22 @@ export default function App(){
     return ()=>clearTimeout(debounceRef.current);
   },[activePair,fetchPair]);
 
-  // auto-refresh 3 min
+  // auto-refresh every 10 min, starts after 5 min
   useEffect(()=>{
+    clearInterval(timerRef.current);
     if(!autoR) return;
-    timerRef.current=setInterval(()=>doScan(true),180000);
-    return()=>clearInterval(timerRef.current);
-  },[autoR,doScan]);
+    timerRef.current = setInterval(()=>doScan(true), 600000); // 10 min
+    return () => clearInterval(timerRef.current);
+  },[autoR]); // eslint-disable-line
 
   // switch pair — user explicitly clicked
   const switchPair = (sym) => {
     if(sym === activePair) return;
-    hasSwitched.current = true;   // mark that user has switched
+    hasSwitched.current = true;
     lastLoadedPair.current = null;
     setAP(sym);
-    setInd(null); setQuote(null); setCandles([]);
+    // Don't clear ind/quote/candles immediately — prevents flicker
+    // They get replaced when fetchPair completes
     if(tab==="report"){
       const d=scanData.find(x=>x.symbol===sym);
       if(d){ setReport(null); genReport(d); }

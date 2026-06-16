@@ -172,17 +172,30 @@ app.get("/api/quote", async (req, res) => {
     res.json({symbol,price,open:parseFloat(raw[0].open),high:parseFloat(raw[raw.length-1].high),low:parseFloat(raw[raw.length-1].low),change:price-prev,change_pct:((price-prev)/prev)*100});
   } catch(e) { res.status(500).json({error:e.message}); }
 });
-let scanLock = false;
+let scanPromise = null;
+let lastScanResult = null;
+let lastScanTime = 0;
 app.get("/api/scan", async (req, res) => {
-  if (scanLock) {
-    console.log("[scan] Skipping — already in progress");
-    return res.status(429).json({ error:"Scan in progress" });
+  // If scan already running, wait for it
+  if (scanPromise) {
+    try {
+      const result = await scanPromise;
+      return res.json(result);
+    } catch(e) {
+      return res.status(500).json({ error: e.message });
+    }
   }
-  scanLock = true;
+  // If last scan was < 30s ago, return cached result
+  if (lastScanResult && Date.now() - lastScanTime < 30000) {
+    return res.json(lastScanResult);
+  }
   const PAIRS=["EUR/USD","GBP/USD","USD/JPY","USD/CHF","AUD/USD","USD/CAD","EUR/GBP","EUR/JPY","BTC/USD","ETH/USD","SOL/USD"];
   const TIER1=["EUR/USD","GBP/USD","USD/JPY","USD/CHF"];
   const CRYPTO=["BTC/USD","ETH/USD","SOL/USD"];
   const results=[];
+  // Wrap in a promise so concurrent requests can await it
+  let resolvePromise, rejectPromise;
+  scanPromise = new Promise((res, rej) => { resolvePromise = res; rejectPromise = rej; });
   console.log(`\n[scan] Starting ${PAIRS.length} pairs`);
   for (const symbol of PAIRS) {
     try {
@@ -208,9 +221,13 @@ app.get("/api/scan", async (req, res) => {
     } catch(e) { console.error(`  ✗ ${symbol}:`,e.message); }
   }
   scanInProgress = false;
-  scanLock = false;
+  const output = {pairs:results.sort((a,b)=>b.atr_pips-a.atr_pips),scanned_at:new Date().toISOString()};
   console.log(`[scan] Done: ${results.length}/${PAIRS.length}\n`);
-  res.json({pairs:results.sort((a,b)=>b.atr_pips-a.atr_pips),scanned_at:new Date().toISOString()});
+  lastScanResult = output;
+  lastScanTime = Date.now();
+  if(resolvePromise) resolvePromise(output);
+  scanPromise = null;
+  res.json(output);
 });
 
 // ── ALERTS ENGINE ─────────────────────────────────────────────────────────────
@@ -403,7 +420,7 @@ Regras: RECOMENDADO apenas se ≥3 confluências. Português europeu. Zero texto
 
   try {
     const {data} = await axios.post("https://api.anthropic.com/v1/messages",
-      {model:"claude-sonnet-4-20250514",max_tokens:1500,
+      {model:"claude-sonnet-4-5",max_tokens:2000,
        system:"Analista forex sénior com Master Prompt v6. Responde APENAS JSON válido, sem markdown.",
        messages:[{role:"user",content:prompt}]},
       {headers:{"x-api-key":AKEY,"anthropic-version":"2023-06-01","Content-Type":"application/json"},timeout:35000}
@@ -419,7 +436,10 @@ Regras: RECOMENDADO apenas se ≥3 confluências. Português europeu. Zero texto
         else if (cleaned[i]==='}') { depth--; if(depth===0){ jsonStr=cleaned.slice(start,i+1); break; } }
       }
     }
-    if(!jsonStr) throw new Error("JSON inválido na resposta IA");
+    if(!jsonStr) {
+      console.error("[report] Raw AI response:", raw.slice(0,500));
+      throw new Error("JSON inválido na resposta IA");
+    }
     const result = JSON.parse(jsonStr);
     // Sanitise risk_reward — extract only "1:X.X" pattern
     if(result.risk_reward) {
@@ -670,6 +690,21 @@ app.get("/api/backtest", async (req, res) => {
   } catch(e) {
     console.error("[backtest]", symbol, e.message);
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ── API KEY TEST ──────────────────────────────────────────────────────────────
+app.get("/api/test-ai", async (req, res) => {
+  if (!AKEY) return res.json({ok:false, error:"ANTHROPIC_API_KEY not set"});
+  try {
+    const {data} = await axios.post("https://api.anthropic.com/v1/messages",
+      {model:"claude-sonnet-4-5", max_tokens:10,
+       messages:[{role:"user", content:"Say OK"}]},
+      {headers:{"x-api-key":AKEY,"anthropic-version":"2023-06-01","Content-Type":"application/json"},timeout:10000}
+    );
+    res.json({ok:true, model:"claude-sonnet-4-5", response:data.content?.[0]?.text});
+  } catch(e) {
+    res.json({ok:false, status:e.response?.status, error:JSON.stringify(e.response?.data||e.message)});
   }
 });
 

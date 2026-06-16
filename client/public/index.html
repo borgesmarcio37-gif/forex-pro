@@ -21,11 +21,10 @@
     <noscript>Necessitas de JavaScript para utilizar esta aplicação.</noscript>
     <div id="root"></div>
     <script>
+    // Unregister any existing service workers to prevent stale cache issues in dev
     if ("serviceWorker" in navigator) {
-      window.addEventListener("load", () => {
-        navigator.serviceWorker.register("/sw.js")
-          .then(r => console.log("[PWA] Service Worker registered"))
-          .catch(e => console.warn("[PWA] SW registration failed:", e));
+      navigator.serviceWorker.getRegistrations().then(regs => {
+        regs.forEach(reg => reg.unregister());
       });
     }
   </script>
