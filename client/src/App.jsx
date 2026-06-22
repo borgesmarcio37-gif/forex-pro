@@ -92,7 +92,7 @@ function AiReport({report,loading,error,onRefresh,symbol}){
   );
   if(!report) return null;
 
-  const {recommendation,direction,confidence,verdict,summary,session_analysis,volume_analysis,institutional,entry,stop_loss:sl_raw,take_profits,risks,checklist,risk_reward} = report;
+  const {recommendation,direction,action,confidence,verdict,summary,session_analysis,volume_analysis,institutional,entry,stop_loss:sl_raw,take_profits,risks,checklist,risk_reward,macro_warning} = report;
   // Sanitise to prevent number leak as invisible text nodes
   const stop_loss = sl_raw ? {...sl_raw, price: String(sl_raw.price||"—"), pips: sl_raw.pips||0} : null;
   const isRec = recommendation==="RECOMENDADO";
@@ -100,6 +100,17 @@ function AiReport({report,loading,error,onRefresh,symbol}){
 
   return(
     <div style={{display:"grid",gap:12}}>
+
+      {/* Action — big, unmistakable instruction */}
+      <C style={{background:rc+"15",borderColor:rc+"66",padding:"20px 22px",textAlign:"center"}}>
+        <div style={{fontSize:11,color:"#253a5e",textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>O que fazer agora</div>
+        <div style={{fontSize:32,fontWeight:900,color:rc,letterSpacing:1}}>
+          {action==="COMPRAR"?"🟢 COMPRAR":action==="VENDER"?"🔴 VENDER":"⏸️ AGUARDAR"}
+        </div>
+        <div style={{fontSize:11,color:"#8aaccc",marginTop:6}}>
+          {action==="COMPRAR"?"Abrir posição LONG (comprado)":action==="VENDER"?"Abrir posição SHORT (vendido)":"Não entrar neste momento"}
+        </div>
+      </C>
 
       {/* Verdict */}
       <C style={{background:rc+"0d",borderColor:rc+"44",padding:"18px 20px"}}>
@@ -113,6 +124,16 @@ function AiReport({report,loading,error,onRefresh,symbol}){
           <div style={{textAlign:"right",flexShrink:0}}>
             <div style={{fontSize:10,color:"#253a5e"}}>Confiança</div>
             <div style={{fontSize:30,fontWeight:800,color:rc,lineHeight:1}}>{confidence}%</div>
+          </div>
+        </div>
+      </C>
+
+      {/* Macro warning — always visible */}
+      <C style={{background:"rgba(245,158,11,.06)",borderColor:"rgba(245,158,11,.3)",padding:"12px 16px"}}>
+        <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+          <span style={{fontSize:16,flexShrink:0}}>⚠️</span>
+          <div style={{fontSize:11,color:"#d4a843",lineHeight:1.7}}>
+            {macro_warning || "Esta análise não verifica calendário económico em tempo real (NFP, juros, CPI, etc). Consulta um calendário económico antes de operar."}
           </div>
         </div>
       </C>
@@ -422,7 +443,7 @@ export default function App(){
   const ladder   = atrPips ? computeLadder(atrPips, rsiVal, bull, macdBull, isCryptoActive) : [];
   // For crypto ladder: server already scales the levels — frontend just displays
 
-  const TABS=[["dashboard","📊 Dashboard"],["scanner","📡 Scanner"],["detail","🔍 Indicadores"],["report","🤖 Relatório IA"],["backtest","📈 Backtest"]];
+  const TABS=[["dashboard","📊 Dashboard"],["scanner","📡 Scanner"],["detail","🔍 Indicadores"],["report","🤖 Relatório IA"],["backtest","📈 Backtest"],["guide","📖 Guia"]];
 
   return(
     <div style={{minHeight:"100vh",background:"#03060e",color:"#8aaccc",fontFamily:"'Segoe UI',system-ui,sans-serif"}}>
@@ -441,7 +462,7 @@ export default function App(){
               <div style={{fontSize:10,color:"#253a5e",display:"flex",alignItems:"center",gap:8,marginTop:1}}>
                 <Dot on={health?.status==="ok"}/>
                 {health?.status==="ok"?"API activa · Dados reais":"A aguardar servidor..."}
-                {updated&&<span>· {updated.toLocaleTimeString("pt-PT")}</span>}
+                {updated&&<span>· {updated.toLocaleDateString("pt-PT",{day:"2-digit",month:"2-digit"})} {updated.toLocaleTimeString("pt-PT")}</span>}
               </div>
             </div>
           </div>
@@ -586,7 +607,7 @@ export default function App(){
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:10}}>
                 <div>
                   <L t="📡 Scanner — 8 Pares com Dados Reais" color="#0d9488" mb={4}/>
-                  <div style={{fontSize:11,color:"#1a5a4a"}}>{scanning?<><Spin/>A varrer pares...</>:updated?`Actualizado ${updated.toLocaleTimeString("pt-PT")}`:"—"}</div>
+                  <div style={{fontSize:11,color:"#1a5a4a"}}>{scanning?<><Spin/>A varrer pares...</>:updated?`Actualizado ${updated.toLocaleDateString("pt-PT",{day:"2-digit",month:"2-digit"})} ${updated.toLocaleTimeString("pt-PT")}`:"—"}</div>
                 </div>
                 <button onClick={()=>doScan()} disabled={scanning} style={{padding:"7px 18px",borderRadius:7,border:"1px solid #0d9488",background:scanning?"rgba(13,148,136,.06)":"rgba(13,148,136,.18)",color:scanning?"#1a5040":"#0d9488",fontSize:11,cursor:scanning?"not-allowed":"pointer",fontFamily:"inherit",fontWeight:700}}>
                   {scanning?<><Spin/>...</>:"🔄 Novo Scan"}
@@ -911,6 +932,269 @@ export default function App(){
                 </div>
               );
             })()}
+          </div>
+        )}
+
+
+        {/* ── GUIA ── */}
+        {tab==="guide"&&(
+          <div style={{display:"grid",gap:14}}>
+
+            <C glow style={{padding:"20px 22px"}}>
+              <div style={{fontSize:18,fontWeight:800,color:"#4da6ff",marginBottom:6}}>📖 Guia de Indicadores</div>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.7}}>Tudo o que precisas de saber para interpretar os dados e tomar decisões de trading com confiança.</div>
+            </C>
+
+            {/* ATR */}
+            <C>
+              <L t="📏 ATR — Average True Range (Volatilidade Diária)" color="#f59e0b"/>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.8,marginBottom:12}}>
+                Mede quanto um par <strong style={{color:"#c8e0ff"}}>se move em média por dia</strong>. Não indica direcção — só amplitude. Calculado pela média de 14 dias do "true range" (máximo entre: alta-baixa, |alta-fecho anterior|, |baixa-fecho anterior|).
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+                <div style={{padding:"10px 12px",background:"rgba(34,197,94,.08)",borderRadius:8,border:"1px solid rgba(34,197,94,.2)"}}>
+                  <div style={{fontSize:11,color:"#22c55e",fontWeight:700,marginBottom:4}}>ATR Alto (ex: 138p no EUR/JPY)</div>
+                  <div style={{fontSize:11,color:"#8aaccc"}}>Maior potencial de lucro por trade, mas SL também tem de ser maior. Bom para swing trading.</div>
+                </div>
+                <div style={{padding:"10px 12px",background:"rgba(239,68,68,.06)",borderRadius:8,border:"1px solid rgba(239,68,68,.15)"}}>
+                  <div style={{fontSize:11,color:"#ef4444",fontWeight:700,marginBottom:4}}>ATR Baixo (ex: 27p no EUR/GBP)</div>
+                  <div style={{fontSize:11,color:"#8aaccc"}}>Menos movimento — alvos mais pequenos, mas também menos risco por pip.</div>
+                </div>
+              </div>
+              <div style={{padding:"10px 12px",background:"rgba(26,95,212,.08)",borderRadius:8,fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                <strong style={{color:"#4da6ff"}}>Exemplo prático:</strong> GBP/USD com ATR 116p significa que, em média, o par move-se 116 pips por dia (entre máximo e mínimo). Se entrares com SL de 50p (menos de metade do ATR), tens margem para o preço respirar sem te tirar do trade prematuramente.
+              </div>
+            </C>
+
+            {/* RSI */}
+            <C>
+              <L t="📊 RSI — Relative Strength Index (Momentum)" color="#f59e0b"/>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.8,marginBottom:12}}>
+                Mede a velocidade e magnitude dos movimentos de preço numa escala de 0-100. Indica se um par está <strong style={{color:"#c8e0ff"}}>sobrecomprado</strong> (preço subiu rápido demais) ou <strong style={{color:"#c8e0ff"}}>sobrevendido</strong> (caiu rápido demais).
+              </div>
+              <div style={{display:"grid",gap:7,marginBottom:12}}>
+                {[
+                  {range:"RSI > 70",label:"Sobrecomprado",color:"#ef4444",action:"Considera SHORT — pode haver correcção"},
+                  {range:"RSI 50-70",label:"Bullish moderado",color:"#22c55e",action:"Tendência de alta saudável"},
+                  {range:"RSI 30-50",label:"Bearish moderado",color:"#f59e0b",action:"Tendência de baixa saudável"},
+                  {range:"RSI < 30",label:"Sobrevendido",color:"#22c55e",action:"Considera LONG — pode haver ressalto"},
+                ].map(r=>(
+                  <div key={r.range} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 12px",background:"rgba(10,20,40,.4)",borderRadius:7}}>
+                    <div style={{width:90,fontSize:11,fontWeight:700,color:r.color}}>{r.range}</div>
+                    <div style={{width:130,fontSize:11,color:"#c8e0ff"}}>{r.label}</div>
+                    <div style={{flex:1,fontSize:11,color:"#8aaccc"}}>{r.action}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{padding:"10px 12px",background:"rgba(245,158,11,.06)",borderRadius:8,border:"1px solid rgba(245,158,11,.2)",fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                <strong style={{color:"#f59e0b"}}>⚠️ Cuidado:</strong> RSI extremo (RSI &lt;30 ou &gt;70) é um aviso, não uma ordem automática. Um par pode ficar sobrecomprado durante dias numa tendência forte. Combina sempre com outros indicadores (MACD, EMA200) antes de entrar contra a tendência principal.
+              </div>
+              <div style={{marginTop:10,padding:"10px 12px",background:"rgba(26,95,212,.08)",borderRadius:8,fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                <strong style={{color:"#4da6ff"}}>Exemplo prático:</strong> USD/CAD com RSI 78.2 (visto no scan de hoje) está fortemente sobrecomprado. Isto gera um alerta 🔔 de "possível reversão SHORT" — mas só entrarias short se o MACD também mostrasse fraqueza e o preço estivesse perto de uma resistência.
+              </div>
+            </C>
+
+            {/* MACD */}
+            <C>
+              <L t="📈 MACD — Moving Average Convergence Divergence (Momentum)" color="#f59e0b"/>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.8,marginBottom:12}}>
+                Compara duas médias móveis (12 e 26 períodos) para identificar mudanças de momentum. O <strong style={{color:"#c8e0ff"}}>histograma</strong> mostra a diferença entre a linha MACD e a linha de sinal — é o que vês na app.
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                <div style={{padding:"10px 12px",background:"rgba(34,197,94,.08)",borderRadius:8,border:"1px solid rgba(34,197,94,.2)"}}>
+                  <div style={{fontSize:11,color:"#22c55e",fontWeight:700,marginBottom:4}}>📈 MACD Bullish (Histograma &gt; 0)</div>
+                  <div style={{fontSize:11,color:"#8aaccc"}}>Momentum de alta — médias rápidas acima das lentas. Favorece LONG.</div>
+                </div>
+                <div style={{padding:"10px 12px",background:"rgba(239,68,68,.06)",borderRadius:8,border:"1px solid rgba(239,68,68,.15)"}}>
+                  <div style={{fontSize:11,color:"#ef4444",fontWeight:700,marginBottom:4}}>📉 MACD Bearish (Histograma &lt; 0)</div>
+                  <div style={{fontSize:11,color:"#8aaccc"}}>Momentum de baixa — médias rápidas abaixo das lentas. Favorece SHORT.</div>
+                </div>
+              </div>
+              <div style={{marginTop:10,padding:"10px 12px",background:"rgba(26,95,212,.08)",borderRadius:8,fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                <strong style={{color:"#4da6ff"}}>Exemplo prático:</strong> Se o EUR/JPY tem Histograma -752, significa momentum bearish forte — as médias rápidas estão claramente abaixo das lentas, reforçando um cenário de continuação de queda.
+              </div>
+            </C>
+
+            {/* Bullish/Bearish + EMA200 */}
+            <C glow>
+              <L t="🎯 Bullish vs Bearish — A Decisão Final" color="#0d9488"/>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.8,marginBottom:12}}>
+                Na app, "Bullish" ou "Bearish" vem da comparação entre o <strong style={{color:"#c8e0ff"}}>preço actual</strong> e a <strong style={{color:"#c8e0ff"}}>EMA200</strong> (média móvel exponencial de 200 dias) — o indicador de tendência de longo prazo mais usado por traders profissionais.
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+                <div style={{padding:"12px 14px",background:"rgba(34,197,94,.1)",borderRadius:8,border:"1px solid rgba(34,197,94,.3)"}}>
+                  <div style={{fontSize:13,color:"#22c55e",fontWeight:800,marginBottom:6}}>📈 BULLISH</div>
+                  <div style={{fontSize:11,color:"#c8e0ff",marginBottom:6}}>Preço ACIMA da EMA200</div>
+                  <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.6}}>Tendência de longo prazo é de subida. O viés correcto é procurar entradas <strong>LONG</strong> (compra) em recuos, não SHORT.</div>
+                </div>
+                <div style={{padding:"12px 14px",background:"rgba(239,68,68,.08)",borderRadius:8,border:"1px solid rgba(239,68,68,.25)"}}>
+                  <div style={{fontSize:13,color:"#ef4444",fontWeight:800,marginBottom:6}}>📉 BEARISH</div>
+                  <div style={{fontSize:11,color:"#c8e0ff",marginBottom:6}}>Preço ABAIXO da EMA200</div>
+                  <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.6}}>Tendência de longo prazo é de queda. O viés correcto é procurar entradas <strong>SHORT</strong> (venda) em repiques, não LONG.</div>
+                </div>
+              </div>
+              <div style={{padding:"12px 14px",background:"rgba(13,148,136,.08)",borderRadius:8,border:"1px solid rgba(13,148,136,.25)",fontSize:11,color:"#8aaccc",lineHeight:1.8}}>
+                <strong style={{color:"#0d9488"}}>Regra de ouro:</strong> "A tendência é tua amiga." Operar a favor da tendência (Bullish→LONG, Bearish→SHORT) tem taxa de sucesso historicamente superior a operar contra ela. Só considera operar contra a tendência principal quando tiveres confluência muito forte de outros sinais (RSI extremo + suporte/resistência forte + sessão ideal).
+              </div>
+            </C>
+
+            {/* Comprado vs Vendido — mecânica explicada */}
+            <C glow style={{borderColor:"rgba(77,166,255,.4)"}}>
+              <L t="💰 Comprado (LONG) vs Vendido (SHORT) — Como Funciona na Prática" color="#4da6ff"/>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.8,marginBottom:14}}>
+                Em forex e crypto, podes ganhar dinheiro tanto quando o preço sobe como quando desce — depende da direcção em que entras.
+              </div>
+
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+                <div style={{padding:"14px 16px",background:"rgba(34,197,94,.08)",borderRadius:10,border:"1px solid rgba(34,197,94,.3)"}}>
+                  <div style={{fontSize:14,fontWeight:800,color:"#22c55e",marginBottom:8}}>🟢 COMPRADO (LONG)</div>
+                  <div style={{fontSize:11,color:"#c8e0ff",lineHeight:1.7,marginBottom:10}}>
+                    Compras o par esperando que o preço <strong>suba</strong>. Ganhas dinheiro se subir, perdes se cair.
+                  </div>
+                  <div style={{padding:"10px",background:"rgba(0,0,0,.25)",borderRadius:7,fontSize:11,color:"#8aaccc",lineHeight:1.8}}>
+                    <strong style={{color:"#22c55e"}}>Exemplo:</strong><br/>
+                    Compras EUR/USD a <strong>1.1600</strong><br/>
+                    Preço sobe para <strong>1.1700</strong><br/>
+                    → Lucro de <strong>100 pips</strong> ✅<br/><br/>
+                    Se caísse para 1.1550 → Perda de 50 pips ❌
+                  </div>
+                </div>
+
+                <div style={{padding:"14px 16px",background:"rgba(239,68,68,.07)",borderRadius:10,border:"1px solid rgba(239,68,68,.3)"}}>
+                  <div style={{fontSize:14,fontWeight:800,color:"#ef4444",marginBottom:8}}>🔴 VENDIDO (SHORT)</div>
+                  <div style={{fontSize:11,color:"#c8e0ff",lineHeight:1.7,marginBottom:10}}>
+                    Vendes o par esperando que o preço <strong>desça</strong>. Ganhas dinheiro se cair, perdes se subir.
+                  </div>
+                  <div style={{padding:"10px",background:"rgba(0,0,0,.25)",borderRadius:7,fontSize:11,color:"#8aaccc",lineHeight:1.8}}>
+                    <strong style={{color:"#ef4444"}}>Exemplo:</strong><br/>
+                    Vendes EUR/USD a <strong>1.1600</strong><br/>
+                    Preço desce para <strong>1.1500</strong><br/>
+                    → Lucro de <strong>100 pips</strong> ✅<br/><br/>
+                    Se subisse para 1.1650 → Perda de 50 pips ❌
+                  </div>
+                </div>
+              </div>
+
+              <div style={{padding:"12px 14px",background:"rgba(26,95,212,.08)",borderRadius:8,border:"1px solid rgba(26,95,212,.2)",fontSize:11,color:"#8aaccc",lineHeight:1.8}}>
+                <strong style={{color:"#4da6ff"}}>Regra simples para usar a app:</strong><br/>
+                • App diz <strong style={{color:"#22c55e"}}>🟢 COMPRAR</strong> → entras LONG → ganhas se o preço subir<br/>
+                • App diz <strong style={{color:"#ef4444"}}>🔴 VENDER</strong> → entras SHORT → ganhas se o preço descer<br/>
+                • App diz <strong style={{color:"#f59e0b"}}>⏸️ AGUARDAR</strong> → não entras agora, falta confluência ou sessão ideal
+              </div>
+
+              <div style={{marginTop:10,padding:"10px 12px",background:"rgba(245,158,11,.06)",borderRadius:8,border:"1px solid rgba(245,158,11,.2)",fontSize:11,color:"#d4a843",lineHeight:1.7}}>
+                ⚠️ <strong>Como executar na prática:</strong> Na tua corretora (MetaTrader, broker forex, exchange crypto), procura o botão "Buy/Compra" para LONG ou "Sell/Venda" para SHORT no par seleccionado. Define sempre o Stop Loss e Take Profit que a app sugere antes de confirmar a ordem.
+              </div>
+            </C>
+
+            {/* Confluência */}
+            <C>
+              <L t="✅ Confluência — Porque 3/3 importa" color="#4da6ff"/>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.8,marginBottom:12}}>
+                A app combina 3 sinais técnicos independentes. Quando os 3 apontam na mesma direcção, a probabilidade de sucesso é estatisticamente maior do que usar um único indicador.
+              </div>
+              <div style={{display:"grid",gap:8}}>
+                {[
+                  {n:"1",t:"Tendência (Preço vs EMA200)",d:"Direcção macro do par"},
+                  {n:"2",t:"MACD (Histograma)",d:"Momentum de curto prazo"},
+                  {n:"3",t:"RSI alinhado",d:"Confirma que não está em extremo contrário"},
+                ].map(s=>(
+                  <div key={s.n} style={{display:"flex",gap:10,alignItems:"center",padding:"8px 12px",background:"rgba(10,20,40,.4)",borderRadius:7}}>
+                    <div style={{width:24,height:24,borderRadius:"50%",background:"rgba(77,166,255,.2)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"#4da6ff",flexShrink:0}}>{s.n}</div>
+                    <div>
+                      <div style={{fontSize:11,fontWeight:700,color:"#c8e0ff"}}>{s.t}</div>
+                      <div style={{fontSize:10,color:"#8aaccc"}}>{s.d}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div style={{marginTop:12,padding:"10px 12px",background:"rgba(26,95,212,.08)",borderRadius:8,fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                <strong style={{color:"#4da6ff"}}>Exemplo prático:</strong> GBP/USD com 3/3 confluências (visto hoje): Bullish + MACD positivo + RSI saudável (51) = sinal forte para LONG. Só 1/3 ou 2/3 significa esperar por mais confirmação.
+              </div>
+            </C>
+
+            {/* Sessões */}
+            <C>
+              <L t="🕐 Sessões e Janela Ideal" color="#a78bfa"/>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.8,marginBottom:12}}>
+                Cada par forex tem horas do dia com mais liquidez (mais participantes a negociar), o que reduz spreads e movimentos erráticos. Operar fora da sessão ideal aumenta o risco de "stop hunts" e slippage.
+              </div>
+              <div style={{display:"grid",gap:7}}>
+                {[
+                  {s:"Killzone Londres",h:"07h–10h Lisboa",pairs:"EUR/USD, GBP/USD, EUR/GBP, USD/CHF"},
+                  {s:"Killzone NY AM",h:"13h30–16h Lisboa",pairs:"USD/CAD, EUR/USD, GBP/USD"},
+                  {s:"Sessão Asiática",h:"00h–07h Lisboa",pairs:"USD/JPY, AUD/USD, EUR/JPY"},
+                  {s:"Crypto 24/7",h:"Sempre activo",pairs:"BTC, ETH, SOL — mas evitar fins-de-semana à noite"},
+                ].map(s=>(
+                  <div key={s.s} style={{display:"flex",justifyContent:"space-between",padding:"8px 12px",background:"rgba(10,20,40,.4)",borderRadius:7,flexWrap:"wrap",gap:6}}>
+                    <div style={{fontSize:11,fontWeight:700,color:"#a78bfa"}}>{s.s}</div>
+                    <div style={{fontSize:11,color:"#c8e0ff"}}>{s.h}</div>
+                    <div style={{fontSize:10,color:"#8aaccc"}}>{s.pairs}</div>
+                  </div>
+                ))}
+              </div>
+            </C>
+
+            {/* Pip Ladder */}
+            <C>
+              <L t="📊 Pip Probability Ladder" color="#22c55e"/>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.8,marginBottom:12}}>
+                Mostra a probabilidade estatística de o preço atingir diferentes níveis de pips/USD, baseada no ATR e na confluência actual. Quanto maior o alvo em pips, menor a probabilidade de o atingir num único dia.
+              </div>
+              <div style={{padding:"10px 12px",background:"rgba(34,197,94,.06)",borderRadius:8,border:"1px solid rgba(34,197,94,.15)",fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                <strong style={{color:"#22c55e"}}>Como usar:</strong> Se o ATR é 116p e a ladder mostra 80% de probabilidade em +100p, isso é quase 1× o ATR diário — realista para day trade. Em +400p (quase 4× ATR) a probabilidade cai para ~25% — mais realista como alvo de swing trade ao longo de vários dias.
+              </div>
+            </C>
+
+            {/* Eventos macroeconómicos — limitação importante */}
+            <C style={{borderColor:"rgba(245,158,11,.4)",background:"rgba(245,158,11,.04)"}}>
+              <L t="⚠️ Eventos Macroeconómicos — O Que a App NÃO Faz" color="#f59e0b"/>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.8,marginBottom:12}}>
+                <strong style={{color:"#f59e0b"}}>Importante:</strong> Esta app analisa apenas dados técnicos (preço, RSI, MACD, EMAs). <strong style={{color:"#c8e0ff"}}>Não verifica calendário económico em tempo real</strong> — ou seja, não sabe se há um anúncio de taxas de juro, NFP (Non-Farm Payrolls), CPI (inflação) ou decisão de banco central nas próximas horas.
+              </div>
+              <div style={{padding:"12px 14px",background:"rgba(239,68,68,.06)",borderRadius:8,border:"1px solid rgba(239,68,68,.2)",fontSize:11,color:"#8aaccc",lineHeight:1.8,marginBottom:12}}>
+                <strong style={{color:"#ef4444"}}>Porque isto importa:</strong> Um setup técnico perfeito (3/3 confluências) pode ser completamente anulado por uma notícia inesperada. Os bancos centrais e dados económicos movem o mercado muito mais rápido e bruscamente do que qualquer indicador técnico consegue prever.
+              </div>
+              <div style={{fontSize:11,color:"#253a5e",marginBottom:8,fontWeight:700}}>Antes de qualquer entrada, consulta um calendário económico:</div>
+              <div style={{display:"grid",gap:6}}>
+                {[
+                  {n:"ForexFactory",d:"forexfactory.com/calendar — gratuito, em inglês, muito usado por traders"},
+                  {n:"Investing.com",d:"investing.com/economic-calendar — disponível em português"},
+                  {n:"MyFXBook",d:"myfxbook.com/forex-economic-calendar — alternativa gratuita"},
+                ].map(s=>(
+                  <div key={s.n} style={{padding:"8px 12px",background:"rgba(10,20,40,.4)",borderRadius:7}}>
+                    <div style={{fontSize:11,fontWeight:700,color:"#4da6ff"}}>{s.n}</div>
+                    <div style={{fontSize:10,color:"#8aaccc",marginTop:2}}>{s.d}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{marginTop:12,padding:"10px 12px",background:"rgba(13,148,136,.08)",borderRadius:8,fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                <strong style={{color:"#0d9488"}}>Regra prática:</strong> Evita abrir novas posições 30-60 minutos antes e depois de eventos de alto impacto (marcados em vermelho nesses calendários). Se já tens uma posição aberta, considera fechá-la ou reduzir o tamanho antes do evento.
+              </div>
+            </C>
+
+            {/* Resumo de decisão */}
+            <C glow style={{borderColor:"rgba(245,158,11,.4)"}}>
+              <L t="🎯 Checklist Rápido Antes de Entrar" color="#f59e0b"/>
+              <div style={{display:"grid",gap:6}}>
+                {[
+                  "Tendência (Bullish/Bearish) está clara e alinhada com a direcção que queres operar?",
+                  "RSI não está em extremo contrário à tua entrada?",
+                  "MACD confirma o momentum na mesma direcção?",
+                  "Estás dentro da sessão ideal para este par?",
+                  "O SL está bem posicionado (1.2× ATR é o padrão usado no backtest)?",
+                  "Não há evento macro importante nas próximas 4 horas?",
+                ].map((c,i)=>(
+                  <div key={i} style={{display:"flex",gap:8,padding:"7px 10px",background:"rgba(245,158,11,.04)",borderRadius:6,fontSize:11,color:"#8aaccc"}}>
+                    <span style={{color:"#f59e0b",flexShrink:0}}>☐</span>{c}
+                  </div>
+                ))}
+              </div>
+              <div style={{marginTop:12,fontSize:11,color:"#1a3a5e",lineHeight:1.6,fontStyle:"italic"}}>
+                Quanto mais ✅ no checklist, maior a probabilidade estatística de sucesso. O Relatório IA já faz esta análise automaticamente — usa este guia para entenderes o "porquê" das recomendações.
+              </div>
+            </C>
+
           </div>
         )}
 

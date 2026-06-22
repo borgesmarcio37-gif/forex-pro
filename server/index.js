@@ -364,6 +364,7 @@ INSTRUÇÃO: Com base em TODOS os dados acima, devolve este JSON exacto:
   "recommendation": "RECOMENDADO" ou "NAO_RECOMENDADO",
   "direction": "LONG" ou "SHORT" ou null,
   "confidence": número 0-100,
+  "action": "COMPRAR" ou "VENDER" ou "AGUARDAR" — instrução directa e literal do que fazer,
   "verdict": "1-2 frases directas — mencionar confluência e sessão",
   "summary": "3-4 frases análise técnica completa com EMAs, RSI, MACD e momentum",
   "session_analysis": {
@@ -402,10 +403,11 @@ INSTRUÇÃO: Com base em TODOS os dados acima, devolve este JSON exacto:
     {"level": 3, "price": "calcula", "pips": 0, "close_pct": 20, "target": "TP estendido"}
   ],
   "risk_reward": "R/B calculado para TP2",
+  "macro_warning": "AVISO FIXO: Esta análise não verifica calendário económico em tempo real (NFP, decisões de juros, CPI, etc). Consulta sempre um calendário económico (ex: ForexFactory, Investing.com) antes de operar.",
   "risks": [
     "risco técnico principal",
     "risco de sessão/liquidez",
-    "risco macro ou evento externo"
+    "risco macro ou evento externo — verificar calendário económico manualmente"
   ],
   "checklist": [
     "✅ ou ❌ Confluência ≥3 sinais",
@@ -416,7 +418,7 @@ INSTRUÇÃO: Com base em TODOS os dados acima, devolve este JSON exacto:
   ],
   "pip_ladder": ${JSON.stringify(ladder)}
 }
-Regras: RECOMENDADO apenas se ≥3 confluências. Português europeu. Zero texto fora do JSON.`;
+Regras: RECOMENDADO apenas se ≥3 confluências. O campo "action" deve ser literal e directo: "COMPRAR" significa abrir posição LONG, "VENDER" significa abrir posição SHORT, "AGUARDAR" significa não entrar agora. Português europeu. Zero texto fora do JSON.`;
 
   try {
     const {data} = await axios.post("https://api.anthropic.com/v1/messages",
@@ -451,9 +453,9 @@ Regras: RECOMENDADO apenas se ≥3 confluências. Português europeu. Zero texto
     if(result.take_profits) result.take_profits = result.take_profits.map(tp=>({...tp, price:String(tp.price||"—")}));
     // Remove any numeric top-level fields that could render as stray text
     // (sometimes AI returns extra fields not in the schema)
-    const ALLOWED = ["recommendation","direction","confidence","verdict","summary",
+    const ALLOWED = ["recommendation","direction","action","confidence","verdict","summary",
       "session_analysis","volume_analysis","institutional","entry","stop_loss",
-      "take_profits","risks","checklist","risk_reward","pip_ladder"];
+      "take_profits","risks","checklist","risk_reward","pip_ladder","macro_warning"];
     Object.keys(result).forEach(k => { if(!ALLOWED.includes(k)) { console.log(`[report] Removing extra field: ${k} =`, result[k]); delete result[k]; } });
     console.log("[report] risk_reward:", result.risk_reward);
     // Check alerts after report
