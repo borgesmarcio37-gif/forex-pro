@@ -1146,6 +1146,121 @@ export default function App(){
               </div>
             </C>
 
+            {/* Order Block, FVG, Stop Hunt */}
+            <C glow style={{borderColor:"rgba(167,139,250,.4)"}}>
+              <L t="🏦 Order Block, FVG e Stop Hunt — Conceitos Institucionais" color="#a78bfa"/>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.8,marginBottom:14}}>
+                Estes termos vêm da análise de "Smart Money" — a ideia de que bancos e grandes instituições deixam pistas no gráfico de onde compraram ou venderam em grande volume. A IA infere estas zonas a partir das EMAs e estrutura de preço, não tem acesso a dados reais de ordens institucionais.
+              </div>
+
+              <div style={{display:"grid",gap:10}}>
+                <div style={{padding:"12px 14px",background:"rgba(167,139,250,.08)",borderRadius:8,border:"1px solid rgba(167,139,250,.25)"}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"#a78bfa",marginBottom:6}}>📦 Order Block (OB)</div>
+                  <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.7,marginBottom:8}}>
+                    Uma zona de preço onde se acredita que grandes instituições colocaram ordens de compra ou venda significativas — geralmente perto de uma EMA importante ou onde houve um movimento brusco anterior.
+                  </div>
+                  <div style={{padding:"8px 10px",background:"rgba(0,0,0,.25)",borderRadius:6,fontSize:11,color:"#8aaccc"}}>
+                    <strong style={{color:"#a78bfa"}}>Exemplo do relatório USD/JPY:</strong> "Order Block bullish em 159.78 (EMA50)" — zona onde se espera que compradores institucionais defendam o preço se ele recuar até lá. Se o preço cair até 159.78 e ressaltar, reforça a tese de continuação bullish.
+                  </div>
+                </div>
+
+                <div style={{padding:"12px 14px",background:"rgba(77,166,255,.08)",borderRadius:8,border:"1px solid rgba(77,166,255,.25)"}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"#4da6ff",marginBottom:6}}>📐 FVG — Fair Value Gap</div>
+                  <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.7,marginBottom:8}}>
+                    Um "vazio" ou desequilíbrio no preço, criado quando o mercado se move tão rápido que deixa uma zona sem negociação suficiente. A teoria diz que o preço tende a voltar para preencher essa zona antes de continuar.
+                  </div>
+                  <div style={{padding:"8px 10px",background:"rgba(0,0,0,.25)",borderRadius:6,fontSize:11,color:"#8aaccc"}}>
+                    <strong style={{color:"#4da6ff"}}>Exemplo do relatório USD/JPY:</strong> "FVG entre 159.78-161.07" — esta zona pode ser revisitada pelo preço (parcial ou totalmente) antes de retomar a tendência principal. Útil para identificar possíveis zonas de entrada em pullback.
+                  </div>
+                </div>
+
+                <div style={{padding:"12px 14px",background:"rgba(239,68,68,.07)",borderRadius:8,border:"1px solid rgba(239,68,68,.25)"}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"#ef4444",marginBottom:6}}>🎯 Stop Hunt</div>
+                  <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.7,marginBottom:8}}>
+                    Um movimento brusco de preço, geralmente além de um máximo/mínimo recente, desenhado para "caçar" e activar os stop-loss de traders antes de o preço reverter na direcção esperada originalmente. É uma forma de liquidez fácil para grandes players.
+                  </div>
+                  <div style={{padding:"8px 10px",background:"rgba(0,0,0,.25)",borderRadius:6,fontSize:11,color:"#8aaccc"}}>
+                    <strong style={{color:"#ef4444"}}>Exemplo do relatório USD/JPY:</strong> "Stop Hunt ELEVADO — máximos em 162.00 atraem liquidez de stops" — significa que há probabilidade de o preço subir bruscamente acima de 162.00 (activando stops de vendedores SHORT) antes de eventualmente reverter. Se tiveres um SHORT com SL perto desse nível, está em risco elevado.
+                  </div>
+                </div>
+              </div>
+
+              <div style={{marginTop:12,padding:"10px 12px",background:"rgba(245,158,11,.06)",borderRadius:8,border:"1px solid rgba(245,158,11,.2)",fontSize:11,color:"#d4a843",lineHeight:1.7}}>
+                ⚠️ <strong>Importante:</strong> Estes 3 conceitos são <strong>inferidos estatisticamente</strong> a partir de EMAs e estrutura de preço — não são dados reais de posicionamento institucional (que só bancos e brokers têm acesso). Usa-os como contexto adicional, não como certeza absoluta.
+              </div>
+            </C>
+
+            {/* Killzones detalhadas */}
+            <C>
+              <L t="🌍 Killzones Detalhadas — Asiática, Londres, NY" color="#0d9488"/>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.8,marginBottom:14}}>
+                "Killzone" é o termo usado para as janelas horárias de maior volume e movimento direccional em cada sessão. Fora destas janelas, o mercado tende a "serpentear" sem direcção clara (chamado "ranging").
+              </div>
+
+              <div style={{display:"grid",gap:10}}>
+                <div style={{padding:"12px 14px",background:"rgba(245,158,11,.08)",borderRadius:8,border:"1px solid rgba(245,158,11,.25)"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <div style={{fontSize:12,fontWeight:700,color:"#f59e0b"}}>🌅 Killzone Asiática</div>
+                    <Tag t="00h–07h Lisboa" color="#f59e0b"/>
+                  </div>
+                  <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                    Tóquio e Sydney abrem. Movimento mais contido, ideal para <strong>USD/JPY, AUD/USD, EUR/JPY</strong>. Boa para quem está despperto de madrugada ou usa ordens pendentes.
+                  </div>
+                </div>
+
+                <div style={{padding:"12px 14px",background:"rgba(34,197,94,.08)",borderRadius:8,border:"1px solid rgba(34,197,94,.25)"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <div style={{fontSize:12,fontWeight:700,color:"#22c55e"}}>🏛️ Killzone Londres</div>
+                    <Tag t="07h–10h Lisboa" color="#22c55e"/>
+                  </div>
+                  <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                    A maior sessão em volume forex global. Excelente para <strong>EUR/USD, GBP/USD, EUR/GBP, USD/CHF</strong>. Movimentos direccionais fortes — ideal para entradas de breakout.
+                  </div>
+                </div>
+
+                <div style={{padding:"12px 14px",background:"rgba(77,166,255,.08)",borderRadius:8,border:"1px solid rgba(77,166,255,.25)"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <div style={{fontSize:12,fontWeight:700,color:"#4da6ff"}}>🗽 Killzone NY AM</div>
+                    <Tag t="13h30–16h Lisboa" color="#4da6ff"/>
+                  </div>
+                  <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                    Sobreposição Londres/NY — o período de maior liquidez do dia. Ideal para <strong>USD/CAD, EUR/USD, GBP/USD</strong>. Muitas vezes onde saem dados económicos dos EUA (NFP, CPI).
+                  </div>
+                </div>
+              </div>
+
+              <div style={{marginTop:12,padding:"10px 12px",background:"rgba(13,148,136,.08)",borderRadius:8,border:"1px solid rgba(13,148,136,.2)",fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                <strong style={{color:"#0d9488"}}>Exemplo prático do relatório USD/JPY:</strong> O par estava "Fora de sessão principal" às 20h17 Lisboa — nem killzone asiática (que só abre à meia-noite) nem Londres nem NY. Por isso a recomendação foi ⏸️ AGUARDAR mesmo com 3/3 confluências técnicas: faltava o contexto de liquidez adequado.
+              </div>
+            </C>
+
+            {/* Volume relativo */}
+            <C>
+              <L t="📦 Volume Relativo — O Que Significa Alto/Médio/Baixo" color="#f59e0b"/>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.8,marginBottom:14}}>
+                O volume mostra quantas transacções estão a ocorrer num par. Mais volume = mais liquidez = movimentos mais limpos e previsíveis. Menos volume = maior risco de movimentos erráticos e slippage (a tua ordem executar a um preço pior do que esperavas).
+              </div>
+
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
+                <div style={{padding:"10px 12px",background:"rgba(34,197,94,.08)",borderRadius:8,border:"1px solid rgba(34,197,94,.25)",textAlign:"center"}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"#22c55e",marginBottom:4}}>Alto</div>
+                  <div style={{fontSize:10,color:"#8aaccc"}}>Killzones activas. Movimentos confiáveis. Bom para entrar.</div>
+                </div>
+                <div style={{padding:"10px 12px",background:"rgba(245,158,11,.08)",borderRadius:8,border:"1px solid rgba(245,158,11,.25)",textAlign:"center"}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"#f59e0b",marginBottom:4}}>Médio</div>
+                  <div style={{fontSize:10,color:"#8aaccc"}}>Transição entre sessões. Cautela moderada.</div>
+                </div>
+                <div style={{padding:"10px 12px",background:"rgba(239,68,68,.07)",borderRadius:8,border:"1px solid rgba(239,68,68,.2)",textAlign:"center"}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"#ef4444",marginBottom:4}}>Baixo</div>
+                  <div style={{fontSize:10,color:"#8aaccc"}}>Fora de sessão, fins-de-semana. Evitar novas entradas.</div>
+                </div>
+              </div>
+
+              <div style={{padding:"10px 12px",background:"rgba(26,95,212,.08)",borderRadius:8,fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                <strong style={{color:"#4da6ff"}}>Exemplo prático do relatório USD/JPY:</strong> "Volume Relativo: Baixo — volume decrescente em movimento de extensão, típico de fim de impulso bullish". Isto é um aviso duplo: (1) estás fora de sessão principal, e (2) o próprio movimento de subida pode estar a perder força por falta de participantes a comprar mais.
+              </div>
+            </C>
+
             {/* Eventos macroeconómicos — limitação importante */}
             <C style={{borderColor:"rgba(245,158,11,.4)",background:"rgba(245,158,11,.04)"}}>
               <L t="⚠️ Eventos Macroeconómicos — O Que a App NÃO Faz" color="#f59e0b"/>

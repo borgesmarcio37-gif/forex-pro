@@ -425,7 +425,7 @@ Regras: RECOMENDADO apenas se ≥3 confluências. O campo "action" deve ser lite
       {model:"claude-sonnet-4-5",max_tokens:2000,
        system:"Analista forex sénior com Master Prompt v6. Responde APENAS JSON válido, sem markdown.",
        messages:[{role:"user",content:prompt}]},
-      {headers:{"x-api-key":AKEY,"anthropic-version":"2023-06-01","Content-Type":"application/json"},timeout:35000}
+      {headers:{"x-api-key":AKEY,"anthropic-version":"2023-06-01","Content-Type":"application/json"},timeout:60000}
     );
     const raw=data.content?.find(b=>b.type==="text")?.text||"{}";
     const cleaned = raw.replace(/```json|```/g,"").trim();
