@@ -9,6 +9,8 @@ const cache = new NodeCache({ stdTTL: 300 });
 const PORT  = process.env.PORT || 3001;
 const KEY   = process.env.TWELVE_DATA_API_KEY;
 const AKEY  = process.env.ANTHROPIC_API_KEY;
+const FFKEY = process.env.FINANCEFLOW_API_KEY;
+const FF_BASE = "https://financeflowapi.com/api/v1";
 const BASE  = "https://api.twelvedata.com";
 
 app.use(cors({ origin: "*" }));
@@ -133,6 +135,77 @@ function getSessionInfo(symbol) {
   return { sess, cur, ideal, next, h };
 }
 
+// ── MACRO ECONOMIC CALENDAR (FinanceFlowAPI) ──────────────────────────────────
+let macroCache = { data: null, fetchedAt: 0 };
+const MACRO_TTL = 6 * 60 * 60 * 1000; // 6h cache — events change rarely within a day
+const MACRO_COUNTRIES = ["United States","Euro Area","United Kingdom","Japan","Canada","Switzerland","Australia"];
+
+// Currency -> country mapping for relevance filtering
+const CCY_COUNTRY = {
+  USD:"United States", EUR:"Euro Area", GBP:"United Kingdom",
+  JPY:"Japan", CAD:"Canada", CHF:"Switzerland", AUD:"Australia",
+};
+
+async function fetchMacroEvents() {
+  if (!FFKEY) return [];
+  const now = Date.now();
+  if (macroCache.data && now - macroCache.fetchedAt < MACRO_TTL) return macroCache.data;
+
+  const dateFrom = new Date().toISOString().slice(0,10);
+  const to = new Date(Date.now() + 6*24*60*60*1000); // 6 days ahead (safe under 60-day limit)
+  const dateTo = to.toISOString().slice(0,10);
+
+  const allEvents = [];
+  for (const country of MACRO_COUNTRIES) {
+    try {
+      const { data } = await axios.get(`${FF_BASE}/financial-calendar`, {
+        params: { api_key: FFKEY, country, date_from: dateFrom, date_to: dateTo },
+        timeout: 10000,
+      });
+      if (data?.data) allEvents.push(...data.data.map(e => ({ ...e, country })));
+    } catch (e) {
+      console.error(`[macro] ${country}:`, e.response?.data?.message || e.message);
+    }
+  }
+
+  macroCache = { data: allEvents, fetchedAt: now };
+  console.log(`[macro] Cached ${allEvents.length} events across ${MACRO_COUNTRIES.length} countries`);
+  return allEvents;
+}
+
+// Get events relevant to a symbol (e.g. EUR/USD -> Euro Area + United States events)
+// within the next `hoursAhead` hours, filtered to Moderate/Major impact only
+function getRelevantMacroEvents(symbol, events, hoursAhead = 24) {
+  const ccys = symbol.replace(/[^A-Z/]/g,"").split("/");
+  const countries = ccys.map(c => CCY_COUNTRY[c]).filter(Boolean);
+  if (countries.length === 0) return [];
+
+  const now = Date.now();
+  const cutoff = now + hoursAhead * 60 * 60 * 1000;
+
+  return events
+    .filter(e => countries.includes(e.country))
+    .filter(e => e.economicImpact === "Major" || e.economicImpact === "Moderate")
+    .map(e => ({ ...e, ts: new Date(e.datetime.replace(" ","T")+"Z").getTime() }))
+    .filter(e => e.ts >= now && e.ts <= cutoff)
+    .sort((a,b) => a.ts - b.ts);
+}
+
+app.get("/api/macro-events", async (req, res) => {
+  try {
+    const { symbol } = req.query;
+    const events = await fetchMacroEvents();
+    if (symbol) {
+      const relevant = getRelevantMacroEvents(symbol, events, 48);
+      return res.json({ symbol, events: relevant, count: relevant.length });
+    }
+    res.json({ events, count: events.length, cached_at: new Date(macroCache.fetchedAt).toISOString() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 // ── ROUTES ────────────────────────────────────────────────────────────────────
 app.get("/api/health", (_req, res) =>
   res.json({ status:"ok", key_set:!!KEY, ai_key:!!AKEY,
@@ -228,6 +301,9 @@ app.get("/api/scan", async (req, res) => {
   if(resolvePromise) resolvePromise(output);
   scanPromise = null;
   res.json(output);
+  // Check technical + macro alerts in background (after responding to client)
+  checkAlerts(results);
+  checkMacroAlerts(results).catch(()=>{});
 });
 
 // ── ALERTS ENGINE ─────────────────────────────────────────────────────────────
@@ -281,11 +357,43 @@ app.post("/api/alerts/read", (req, res) => {
   res.json({ ok: true });
 });
 
+// Check macro events against active pairs — fires alerts for imminent Major events
+async function checkMacroAlerts(pairs) {
+  if (!FFKEY) return;
+  try {
+    const allEvents = await fetchMacroEvents();
+    const now = new Date().toISOString();
+    pairs.forEach(p => {
+      const relevant = getRelevantMacroEvents(p.symbol, allEvents, 4); // next 4h only
+      relevant.forEach(e => {
+        if (e.economicImpact !== "Major") return;
+        const id = `macro_${p.symbol}_${e.report_name}_${e.datetime}`.replace(/\s+/g,"_");
+        const existing = alertsStore.triggered.find(t => t.id === id);
+        if (!existing) {
+          const hoursAway = Math.round((e.ts - Date.now())/3600000*10)/10;
+          const alert = { id, symbol:p.symbol, label:`${p.symbol} evento macro 🚨`,
+            msg:`${e.country} — ${e.report_name} em ${hoursAway}h (impacto ALTO)`, time:now, read:false };
+          alertsStore.triggered.unshift(alert);
+          if (alertsStore.triggered.length > 50) alertsStore.triggered.pop();
+          console.log(`  🚨 MACRO: ${alert.label} — ${alert.msg}`);
+        }
+      });
+    });
+  } catch(e) { console.error("[macro-alerts]", e.message); }
+}
+
 // ── MASTER PROMPT v6 REPORT ───────────────────────────────────────────────────
 app.post("/api/report", async (req, res) => {
   if (!AKEY) return res.status(400).json({error:"ANTHROPIC_API_KEY não configurada no .env"});
   const {symbol,price,change_pct,high,low,atr_pips,rsi,macd,ema50,ema200,trend} = req.body;
   const bull=trend==="bull", mb=(macd?.hist||0)>0;
+
+  // Fetch real macro events for this pair's currencies (next 48h)
+  let macroEvents = [];
+  try {
+    const allEvents = await fetchMacroEvents();
+    macroEvents = getRelevantMacroEvents(symbol, allEvents, 48);
+  } catch(e) { console.error("[report] macro fetch failed:", e.message); }
   const f4=n=>(typeof n==="number"?n.toFixed(4):"—");
   const f2=n=>(typeof n==="number"?n.toFixed(2):"—");
   const isJpy=symbol.includes("JPY");
@@ -314,6 +422,17 @@ app.post("/api/report", async (req, res) => {
   const tp2 = (price + dir*tp2Pips*pip).toFixed(isJpy?2:4);
   const tp3 = (price + dir*tp3Pips*pip).toFixed(isJpy?2:4);
 
+  // Format real macro events for the prompt (or note their absence)
+  const macroText = macroEvents.length > 0
+    ? macroEvents.map(e => {
+        const eventTime = new Date(e.ts);
+        const hoursAway = Math.round((e.ts - Date.now()) / 3600000 * 10) / 10;
+        return `[${e.economicImpact==="Major"?"🔴 ALTO":"🟡 MÉDIO"}] ${e.country} — ${e.report_name} — ${eventTime.toLocaleString("pt-PT",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})} (em ${hoursAway}h) | Previous: ${e.previous||"—"} | Consensus: ${e.consensus||"—"}`;
+      }).join("\n")
+    : "Sem eventos de impacto Moderado/Major identificados nas próximas 48h para as moedas deste par.";
+  const hasImminentMajor = macroEvents.some(e => e.economicImpact === "Major" && e.ts - Date.now() < 4*3600000);
+  const hasImminentModerate = macroEvents.some(e => (e.economicImpact === "Major"||e.economicImpact === "Moderate") && e.ts - Date.now() < 4*3600000);
+
   const prompt = `És um analista de forex profissional sénior. Analisa ${symbol} com dados reais e devolve APENAS JSON válido.
 
 ═══════════════════════════════════════════════════════
@@ -327,6 +446,12 @@ EMA50: ${f4(ema50)} | EMA200: ${f4(ema200)}
 Preço vs EMA50:  ${bull&&price>ema50?"ACIMA ✓":"ABAIXO ✗"}
 Preço vs EMA200: ${bull&&price>ema200?"ACIMA ✓":"ABAIXO ✗"} → Tendência ${bull?"BULLISH":"BEARISH"}
 Confluência técnica: ${confluence}/3 sinais alinhados
+
+═══════════════════════════════════════════════════════
+CALENDÁRIO ECONÓMICO REAL — Próximas 48h (fonte: FinanceFlowAPI)
+═══════════════════════════════════════════════════════
+${macroText}
+${hasImminentMajor ? "\n⚠️⚠️ ALERTA: Evento de ALTO impacto nas próximas 4h — recomenda fortemente AGUARDAR ou reduzir confiança." : hasImminentModerate ? "\n⚠️ Aviso: Evento de impacto Moderado/Major nas próximas 4h — considera isso na confiança." : ""}
 
 ═══════════════════════════════════════════════════════
 ANÁLISE DE SESSÃO
@@ -403,7 +528,7 @@ INSTRUÇÃO: Com base em TODOS os dados acima, devolve este JSON exacto:
     {"level": 3, "price": "calcula", "pips": 0, "close_pct": 20, "target": "TP estendido"}
   ],
   "risk_reward": "R/B calculado para TP2",
-  "macro_warning": "AVISO FIXO: Esta análise não verifica calendário económico em tempo real (NFP, decisões de juros, CPI, etc). Consulta sempre um calendário económico (ex: ForexFactory, Investing.com) antes de operar.",
+  "macro_warning": "baseado nos eventos reais listados acima — se houver evento Major/Moderate nas próximas 4-12h, menciona-o explicitamente com nome e hora; se não houver nada relevante, diz isso claramente",
   "risks": [
     "risco técnico principal",
     "risco de sessão/liquidez",
@@ -418,7 +543,7 @@ INSTRUÇÃO: Com base em TODOS os dados acima, devolve este JSON exacto:
   ],
   "pip_ladder": ${JSON.stringify(ladder)}
 }
-Regras: RECOMENDADO apenas se ≥3 confluências. O campo "action" deve ser literal e directo: "COMPRAR" significa abrir posição LONG, "VENDER" significa abrir posição SHORT, "AGUARDAR" significa não entrar agora. Português europeu. Zero texto fora do JSON.`;
+Regras: RECOMENDADO apenas se ≥3 confluências E sem evento Major nas próximas 4h. Se houver evento Major iminente (<4h), força "action":"AGUARDAR" independentemente da confluência técnica e reduz a "confidence" para ≤40. O campo "action" deve ser literal e directo: "COMPRAR" significa abrir posição LONG, "VENDER" significa abrir posição SHORT, "AGUARDAR" significa não entrar agora. Português europeu. Zero texto fora do JSON.`;
 
   try {
     const {data} = await axios.post("https://api.anthropic.com/v1/messages",
@@ -458,6 +583,11 @@ Regras: RECOMENDADO apenas se ≥3 confluências. O campo "action" deve ser lite
       "take_profits","risks","checklist","risk_reward","pip_ladder","macro_warning"];
     Object.keys(result).forEach(k => { if(!ALLOWED.includes(k)) { console.log(`[report] Removing extra field: ${k} =`, result[k]); delete result[k]; } });
     console.log("[report] risk_reward:", result.risk_reward);
+    // Attach raw real macro events (for UI display, independent of AI's text summary)
+    result.macro_events = macroEvents.map(e => ({
+      country: e.country, report_name: e.report_name, economicImpact: e.economicImpact,
+      datetime: e.datetime, previous: e.previous, consensus: e.consensus, actual: e.actual,
+    }));
     // Check alerts after report
     if (req.body.scanPairs) checkAlerts(req.body.scanPairs);
     res.json(result);
@@ -709,6 +839,7 @@ app.get("/api/test-ai", async (req, res) => {
     res.json({ok:false, status:e.response?.status, error:JSON.stringify(e.response?.data||e.message)});
   }
 });
+
 
 app.listen(PORT, () => {
   console.log(`\n🏦 Forex Master Pro v7 — Master Prompt v6 Edition`);

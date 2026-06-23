@@ -92,11 +92,21 @@ function AiReport({report,loading,error,onRefresh,symbol}){
   );
   if(!report) return null;
 
-  const {recommendation,direction,action,confidence,verdict,summary,session_analysis,volume_analysis,institutional,entry,stop_loss:sl_raw,take_profits,risks,checklist,risk_reward,macro_warning} = report;
+  const {recommendation,direction,action,confidence,verdict,summary,session_analysis,volume_analysis,institutional,entry,stop_loss:sl_raw,take_profits,risks,checklist,risk_reward,macro_warning,macro_events} = report;
   // Sanitise to prevent number leak as invisible text nodes
   const stop_loss = sl_raw ? {...sl_raw, price: String(sl_raw.price||"—"), pips: sl_raw.pips||0} : null;
   const isRec = recommendation==="RECOMENDADO";
   const rc = isRec?(direction==="LONG"?"#22c55e":"#ef4444"):"#6a9ab8";
+
+  // Classify macro events by urgency
+  const events = macro_events || [];
+  const now = Date.now();
+  const eventsWithMeta = events.map(e=>{
+    const ts = new Date(e.datetime.replace(" ","T")+"Z").getTime();
+    const hoursAway = (ts - now) / 3600000;
+    return {...e, hoursAway};
+  }).sort((a,b)=>a.hoursAway-b.hoursAway);
+  const imminentMajor = eventsWithMeta.some(e=>e.economicImpact==="Major" && e.hoursAway<4);
 
   return(
     <div style={{display:"grid",gap:12}}>
@@ -128,14 +138,46 @@ function AiReport({report,loading,error,onRefresh,symbol}){
         </div>
       </C>
 
-      {/* Macro warning — always visible */}
-      <C style={{background:"rgba(245,158,11,.06)",borderColor:"rgba(245,158,11,.3)",padding:"12px 16px"}}>
-        <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
-          <span style={{fontSize:16,flexShrink:0}}>⚠️</span>
-          <div style={{fontSize:11,color:"#d4a843",lineHeight:1.7}}>
-            {macro_warning || "Esta análise não verifica calendário económico em tempo real (NFP, juros, CPI, etc). Consulta um calendário económico antes de operar."}
+      {/* Macro events — real calendar data */}
+      <C style={{background:imminentMajor?"rgba(239,68,68,.08)":"rgba(245,158,11,.06)",borderColor:imminentMajor?"rgba(239,68,68,.4)":"rgba(245,158,11,.3)",padding:"14px 16px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:events.length>0?10:0}}>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <span style={{fontSize:16}}>{imminentMajor?"🚨":"📅"}</span>
+            <span style={{fontSize:12,fontWeight:700,color:imminentMajor?"#ef4444":"#f59e0b"}}>
+              {events.length>0?`Calendário Económico — ${events.length} evento${events.length>1?"s":""} (48h)`:"Calendário Económico"}
+            </span>
           </div>
+          <Tag t="Dados reais" color="#22c55e"/>
         </div>
+
+        {events.length>0?(
+          <div style={{display:"grid",gap:6}}>
+            {eventsWithMeta.map((e,i)=>{
+              const isImminent = e.hoursAway < 4;
+              const isMajor = e.economicImpact === "Major";
+              return(
+                <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",background:isImminent?"rgba(239,68,68,.1)":"rgba(10,20,40,.4)",borderRadius:7,border:isImminent?"1px solid rgba(239,68,68,.3)":"none"}}>
+                  <span style={{fontSize:9,fontWeight:700,padding:"2px 6px",borderRadius:4,background:isMajor?"rgba(239,68,68,.2)":"rgba(245,158,11,.2)",color:isMajor?"#ef4444":"#f59e0b",flexShrink:0}}>
+                    {isMajor?"ALTO":"MÉDIO"}
+                  </span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:11,fontWeight:600,color:"#c8e0ff"}}>{e.country} — {e.report_name}</div>
+                    <div style={{fontSize:10,color:"#8aaccc",marginTop:1}}>
+                      {new Date(e.datetime.replace(" ","T")+"Z").toLocaleString("pt-PT",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}
+                      {" · "}{e.hoursAway<1?`em ${Math.round(e.hoursAway*60)}min`:`em ${Math.round(e.hoursAway)}h`}
+                      {e.previous&&` · Anterior: ${e.previous}`}{e.consensus&&` · Consenso: ${e.consensus}`}
+                    </div>
+                  </div>
+                  {isImminent&&<span style={{fontSize:9,color:"#ef4444",fontWeight:700,flexShrink:0}}>⏰ IMINENTE</span>}
+                </div>
+              );
+            })}
+          </div>
+        ):(
+          <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+            {macro_warning || "Sem eventos de impacto Moderado/Major identificados nas próximas 48h para este par."}
+          </div>
+        )}
       </C>
 
       {/* Session Analysis */}
