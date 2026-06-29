@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, BarChart, Bar, Cell, ReferenceLine } from "recharts";
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
@@ -18,6 +18,65 @@ const get  = async (p) => { const r=await fetch(`${BASE}${p}`); if(!r.ok) throw 
 
 function pipColor(p){ return p>=80?"#22c55e":p>=60?"#4da6ff":p>=40?"#f59e0b":p>=20?"#f97316":"#ef4444"; }
 function pipLabel(p){ return p>=80?"Quase certo":p>=60?"Alta prob.":p>=40?"Moderada":p>=20?"Baixa":"Improvável"; }
+
+// A pair "qualifies" for a highlighted setup using criteria CALIBRATED PER PAIR from
+// the 11-pair backtest run on 2026-06-29 (500 days, SL=1.2xATR/TP1=1.8x/TP2=3x):
+//
+//   FOREX (default — Confluência 3/3 path):
+//     EUR/USD  PF 1.05  +7.3%   ✓ reliable (76 trades)
+//     USD/JPY  PF 2.10  +38.0%  ✓ best performer (53 trades)
+//     AUD/USD  PF 1.38  +6.9%   ✓ reliable (49 trades)
+//     EUR/GBP  PF 1.06  +4.3%   ✓ reliable (70 trades)
+//     USD/CHF  —  only 2 trades, inconclusive — still allowed, just rare to trigger
+//     USD/CAD  PF 0.90  -33p    — only 9 trades, inconclusive — still allowed
+//
+//   EXCLUDED — backtest shows consistent, large-sample losses with this strategy:
+//     GBP/USD  PF 0.74  -11.4%  (63 trades) — excluded from ⭐ entirely
+//     EUR/JPY  PF 0.59  -18.0%  (75 trades) — excluded from ⭐ entirely
+//
+//   CRYPTO — Confluência 3/3 LOSES on all three (PF 0.00-0.30); RSI Extremo WINS on
+//   all three (PF 1.38-1.47) instead, so crypto uses a different qualification path:
+//     BTC/USD  RSI Extremo PF 1.38  +4.0%  (24 trades)
+//     ETH/USD  RSI Extremo PF 1.47  +2.7%  (22 trades)
+//     SOL/USD  RSI Extremo PF 1.47  +9.5%  (28 trades)
+//
+// Re-run /api/backtest-all periodically and revisit these thresholds — they reflect
+// one historical window, not a permanent guarantee.
+const QUALIFY_EXCLUDED_PAIRS = ["GBP/USD", "EUR/JPY"];
+const QUALIFY_MIN_LADDER_PROB = 80; // floor at "Quase certo" tier for the forex/confluence path
+
+function firstLadderProb(s, isCrypto){
+  if(!s) return 0;
+  const bull = s.trend === "bull";
+  const macdBull = (s.macd?.hist||0) > 0;
+  const atrPips = s.atr_pips || 1;
+  const ladder = computeLadder(atrPips, s.rsi, bull, macdBull, isCrypto);
+  return ladder[0]?.prob || 0; // first level: +50p forex, or 20% of ATR for crypto
+}
+
+function isQualified(s, isCrypto=false){
+  if(!s) return false;
+  if(QUALIFY_EXCLUDED_PAIRS.includes(s.symbol)) return false; // Ajuste B: backtest-proven losers
+
+  if(isCrypto){
+    // Ajuste A: crypto qualifies on RSI Extremo (the only profitable path found), not confluence.
+    // No ladder-probability floor here — RSI extremity is itself the signal, and the existing
+    // ladder formula isn't calibrated for crypto's much larger pip/dollar magnitudes anyway.
+    const rsiLong  = s.rsi <= 30;
+    const rsiShort = s.rsi >= 70;
+    return (rsiLong || rsiShort) && s.ideal_session;
+  }
+
+  // Default forex path: confluence + session + healthy RSI + ladder probability floor
+  const bull = s.trend === "bull";
+  const macdBull = (s.macd?.hist||0) > 0;
+  const rsiAligned = (s.rsi>50 && s.rsi<65 && bull) || (s.rsi<50 && s.rsi>35 && !bull);
+  const confluence = (bull?1:0) + (macdBull?1:0) + (rsiAligned?1:0);
+  const rsiExtreme = s.rsi >= 70 || s.rsi <= 30;
+  const technicallySound = confluence >= 3 && s.ideal_session && !rsiExtreme;
+  if(!technicallySound) return false;
+  return firstLadderProb(s, isCrypto) >= QUALIFY_MIN_LADDER_PROB;
+}
 
 function computeLadder(atrPips, rsi, bull, macdBull, isCrypto=false){
   const momentum=(bull?1:0)+(macdBull?1:0)+((rsi>50&&bull)||(rsi<50&&!bull)?1:0);
@@ -69,8 +128,150 @@ function PipLadder({ladder,dir,isCrypto=false}){
   );
 }
 
+// ── EXECUTE ORDER PANEL ────────────────────────────────────────────────────────
+function ExecutePanel({symbol, direction, entryPrice, stopPrice, limitPrice, igAccount, igStatus, isCrypto}){
+  const [sizingMode,setSizingMode] = useState("risk"); // "risk" | "fixed"
+  const [riskPct,setRiskPct]       = useState(1);
+  const [fixedAmount,setFixedAmount] = useState(50);
+  const [confirming,setConfirming] = useState(false);
+  const [executing,setExecuting]   = useState(false);
+  const [result,setResult]         = useState(null);
+  const [execErr,setExecErr]       = useState(null);
+
+  if (!igStatus?.configured) return null; // hide entirely if IG not set up
+  if (!entryPrice || !stopPrice) return null; // need valid levels
+  if (isCrypto) return ( // size conventions for IG crypto CFDs differ and are unverified — block until confirmed
+    <C style={{borderColor:"rgba(245,158,11,.3)",background:"rgba(245,158,11,.05)"}}>
+      <div style={{fontSize:11,color:"#d4a843",lineHeight:1.7}}>
+        ⚠️ Execução automática para pares crypto ({symbol}) ainda não disponível — as convenções de tamanho de posição da IG para crypto CFDs ainda não foram verificadas. Disponível apenas para pares forex por agora.
+      </div>
+    </C>
+  );
+
+  const balance = igAccount?.available || 0;
+  const riskDistance = Math.abs(entryPrice - stopPrice); // price units, not pips — works for any instrument
+  const riskAmount = sizingMode === "risk" ? balance * (riskPct/100) : fixedAmount;
+  // BUGFIX (confirmed via /api/ig/market-details): IG's "size" field for forex CFDs is
+  // CONTRACTS, not raw currency units — each contract = contractSize units (100,000 for
+  // most majors, confirmed via market-details for USDCHF). A REJECTED/UNKNOWN order on
+  // 2026-06-29 traced back to sending size=22222 (interpreted as 22,222 CONTRACTS =
+  // 2.2 billion units) when we meant 22,222 units = 0.2222 contracts.
+  // Correct sizing: contracts = riskAmount / (riskDistanceInPrice × contractSize/contractSize)
+  // simplifies to: contracts = (riskAmount / riskDistance) / CONTRACT_SIZE
+  const CONTRACT_SIZE = 100000; // confirmed for USD/CHF; standard for most forex CFD majors on IG
+  const calcUnits = riskDistance > 0 ? riskAmount / riskDistance : 0;
+  const calcContracts = calcUnits / CONTRACT_SIZE;
+  // IG's minDealSize for forex CFDs is typically 0.1 contracts — round to 2 decimals and
+  // floor at that minimum so we never submit a size IG will reject as too small either.
+  const size = Math.max(0.1, Math.round(calcContracts * 100) / 100);
+
+  const dirIG = direction === "LONG" ? "BUY" : "SELL";
+  const rc = direction === "LONG" ? "#22c55e" : "#ef4444";
+
+  async function handleConfirm(){
+    setExecuting(true); setExecErr(null);
+    try {
+      const r = await fetch(`${BASE}/ig/order`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ symbol, direction: dirIG, size, stopLevel: stopPrice, limitLevel: limitPrice })
+      });
+      const d = await r.json();
+      if(!d.ok) throw new Error(d.error || "Falha ao executar ordem");
+      setResult(d); setConfirming(false);
+    } catch(e) { setExecErr(e.message); }
+    finally { setExecuting(false); }
+  }
+
+  if (result) return (
+    <C style={{borderColor:"rgba(34,197,94,.4)",background:"rgba(34,197,94,.06)"}}>
+      <div style={{fontSize:13,fontWeight:700,color:"#22c55e",marginBottom:8}}>✅ Ordem executada — {result.mode}</div>
+      <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+        Estado: <strong style={{color:"#c8e0ff"}}>{result.confirm?.dealStatus}</strong> · Referência: {result.dealReference}<br/>
+        {result.confirm?.reason && `Motivo: ${result.confirm.reason}`}
+      </div>
+      <button onClick={()=>setResult(null)} style={{marginTop:10,padding:"6px 14px",borderRadius:6,border:"1px solid rgba(34,197,94,.4)",background:"transparent",color:"#22c55e",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>Fechar</button>
+    </C>
+  );
+
+  return(
+    <C glow style={{borderColor:rc+"55"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
+        <L t="🚀 Executar Ordem" color={rc} mb={0}/>
+        <Tag t={igStatus.mode==="DEMO"?"🟢 DEMO":"⚠️ LIVE"} color={igStatus.mode==="DEMO"?"#22c55e":"#ef4444"}/>
+      </div>
+
+      {!confirming?(
+        <>
+          {/* Sizing mode selector */}
+          <div style={{display:"flex",gap:8,marginBottom:12}}>
+            <button onClick={()=>setSizingMode("risk")} style={{flex:1,padding:"8px",borderRadius:7,border:`1px solid ${sizingMode==="risk"?"#4da6ff":"rgba(18,42,78,.7)"}`,background:sizingMode==="risk"?"rgba(77,166,255,.15)":"transparent",color:sizingMode==="risk"?"#4da6ff":"#253a5e",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:sizingMode==="risk"?700:400}}>
+              % do Saldo (recomendado)
+            </button>
+            <button onClick={()=>setSizingMode("fixed")} style={{flex:1,padding:"8px",borderRadius:7,border:`1px solid ${sizingMode==="fixed"?"#4da6ff":"rgba(18,42,78,.7)"}`,background:sizingMode==="fixed"?"rgba(77,166,255,.15)":"transparent",color:sizingMode==="fixed"?"#4da6ff":"#253a5e",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:sizingMode==="fixed"?700:400}}>
+              Valor Fixo ($)
+            </button>
+          </div>
+
+          {sizingMode==="risk"?(
+            <div style={{marginBottom:12}}>
+              <div style={{fontSize:11,color:"#253a5e",marginBottom:6}}>Risco por trade: <strong style={{color:"#4da6ff"}}>{riskPct}%</strong> do saldo disponível ({igAccount?.currency} {balance.toLocaleString()})</div>
+              <input type="range" min="0.25" max="5" step="0.25" value={riskPct} onChange={e=>setRiskPct(parseFloat(e.target.value))} style={{width:"100%"}}/>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#1a3a5e",marginTop:2}}><span>0.25%</span><span>5%</span></div>
+            </div>
+          ):(
+            <div style={{marginBottom:12}}>
+              <div style={{fontSize:11,color:"#253a5e",marginBottom:6}}>Valor a arriscar neste trade ({igAccount?.currency})</div>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+                {[50,60,70,80,100,200,500].map(v=>(
+                  <button key={v} onClick={()=>setFixedAmount(v)} style={{padding:"5px 11px",borderRadius:6,border:`1px solid ${fixedAmount===v?"#4da6ff":"rgba(18,42,78,.7)"}`,background:fixedAmount===v?"rgba(77,166,255,.18)":"transparent",color:fixedAmount===v?"#4da6ff":"#8aaccc",fontSize:11,fontWeight:fixedAmount===v?700:400,cursor:"pointer",fontFamily:"inherit"}}>
+                    ${v}
+                  </button>
+                ))}
+              </div>
+              <input type="number" value={fixedAmount} onChange={e=>setFixedAmount(parseFloat(e.target.value)||0)} min="1" step="1" placeholder="Ou escreve um valor personalizado" style={{width:"100%",padding:"8px 10px",borderRadius:7,border:"1px solid rgba(18,42,78,.7)",background:"rgba(4,10,22,.9)",color:"#c8e0ff",fontSize:13,fontFamily:"inherit"}}/>
+            </div>
+          )}
+
+          <div style={{padding:"10px 12px",background:"rgba(10,20,40,.5)",borderRadius:8,marginBottom:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:11}}>
+              <div><span style={{color:"#253a5e"}}>Risco em $:</span> <strong style={{color:"#ef4444"}}>{igAccount?.currency} {riskAmount.toFixed(2)}</strong></div>
+              <div><span style={{color:"#253a5e"}}>Tamanho:</span> <strong style={{color:"#c8e0ff"}}>{size} contratos</strong> <span style={{color:"#1a3a5e",fontSize:9}}>(≈{(size*CONTRACT_SIZE).toLocaleString()} unidades nocionais)</span></div>
+              <div><span style={{color:"#253a5e"}}>Entrada:</span> <strong style={{color:"#c8e0ff"}}>{entryPrice}</strong></div>
+              <div><span style={{color:"#253a5e"}}>SL:</span> <strong style={{color:"#ef4444"}}>{stopPrice}</strong></div>
+            </div>
+          </div>
+
+          <button onClick={()=>setConfirming(true)} disabled={!igAccount||size<=0} style={{width:"100%",padding:"10px",borderRadius:8,border:`1px solid ${rc}`,background:rc+"22",color:rc,fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>
+            {direction==="LONG"?"🟢 Preparar COMPRA":"🔴 Preparar VENDA"}
+          </button>
+        </>
+      ):(
+        <div>
+          <div style={{padding:"14px 16px",background:igStatus.mode==="LIVE"?"rgba(239,68,68,.12)":"rgba(245,158,11,.08)",border:`1px solid ${igStatus.mode==="LIVE"?"rgba(239,68,68,.4)":"rgba(245,158,11,.3)"}`,borderRadius:9,marginBottom:12}}>
+            <div style={{fontSize:13,fontWeight:800,color:igStatus.mode==="LIVE"?"#ef4444":"#f59e0b",marginBottom:8}}>
+              {igStatus.mode==="LIVE"?"⚠️ CONFIRMAR ORDEM REAL":"Confirmar Ordem (Demo)"}
+            </div>
+            <div style={{fontSize:12,color:"#c8e0ff",lineHeight:1.8}}>
+              <strong>{dirIG}</strong> {size} contratos de {symbol} @ MARKET<br/>
+              SL: {stopPrice} · TP: {limitPrice||"—"}<br/>
+              Risco: {igAccount?.currency} {riskAmount.toFixed(2)} ({sizingMode==="risk"?`${riskPct}% do saldo`:"valor fixo"})
+            </div>
+          </div>
+          {execErr&&<div style={{padding:"8px 10px",background:"rgba(239,68,68,.1)",borderRadius:6,fontSize:11,color:"#ef4444",marginBottom:10}}>⚠️ {execErr}</div>}
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setConfirming(false)} disabled={executing} style={{flex:1,padding:"10px",borderRadius:8,border:"1px solid rgba(18,42,78,.7)",background:"transparent",color:"#8aaccc",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>Cancelar</button>
+            <button onClick={handleConfirm} disabled={executing} style={{flex:1,padding:"10px",borderRadius:8,border:`1px solid ${rc}`,background:rc,color:"#03060e",fontSize:12,fontWeight:700,cursor:executing?"not-allowed":"pointer",fontFamily:"inherit"}}>
+              {executing?<><Spin/>A executar...</>:"Confirmar e Executar"}
+            </button>
+          </div>
+        </div>
+      )}
+    </C>
+  );
+}
+
 // ── AI REPORT ─────────────────────────────────────────────────────────────────
-function AiReport({report,loading,error,onRefresh,symbol}){
+function AiReport({report,loading,error,onRefresh,symbol,igAccount,igStatus}){
   if(loading) return(
     <C style={{textAlign:"center",padding:"28px 20px"}}>
       <Spin/><span style={{fontSize:13,color:"#253a5e"}}>A gerar análise IA para {symbol}...</span>
@@ -276,6 +477,20 @@ function AiReport({report,loading,error,onRefresh,symbol}){
         </C>
       )}
 
+      {/* Execute order — only if recommended and IG configured */}
+      {isRec&&(
+        <ExecutePanel
+          symbol={symbol}
+          direction={direction}
+          entryPrice={parseFloat(entry?.zone) || null}
+          stopPrice={parseFloat(stop_loss?.price) || null}
+          limitPrice={parseFloat(take_profits?.[0]?.price) || null}
+          igAccount={igAccount}
+          igStatus={igStatus}
+          isCrypto={CRYPTO.includes(symbol)}
+        />
+      )}
+
       {/* Risks */}
       {risks?.length>0&&(
         <C>
@@ -336,7 +551,21 @@ export default function App(){
   const [autoR,setAutoR]       = useState(true);
   const [btData,setBT]         = useState(null);
   const [btLoad,setBTLoad]     = useState(false);
+  const [btAllData,setBtAllData] = useState(null);
+  const [btAllLoad,setBtAllLoad] = useState(false);
+  const [btAllErr,setBtAllErr]   = useState(null);
+
+  const [igAccount,setIgAccount] = useState(null);
+  const [igPositions,setIgPositions] = useState([]);
+  const [closingDealId,setClosingDealId] = useState(null); // which position is awaiting confirm
+  const [closeLoading,setCloseLoading] = useState(null); // which dealId is currently being closed
+  const [closeErr,setCloseErr] = useState(null);
+  const [igLoad,setIgLoad]     = useState(false);
+  const [igErr,setIgErr]       = useState(null);
+  const [igStatus,setIgStatus] = useState(null);
   const [btPair,setBTPair]     = useState("EUR/USD");
+  const [btCapital,setBtCapital] = useState(100);
+  const [btRiskPct,setBtRiskPct] = useState(1);
   const [alerts,setAlerts]     = useState([]);
   const [showAlerts,setShowAlerts] = useState(false);
   const [installPrompt,setInstallPrompt] = useState(null);
@@ -406,12 +635,60 @@ export default function App(){
     finally { setBTLoad(false); }
   }, []);
 
+  // fetch backtest for ALL pairs at once — server runs them sequentially
+  const fetchBacktestAll = useCallback(async() => {
+    setBtAllLoad(true); setBtAllData(null); setBtAllErr(null);
+    try {
+      const d = await get("/backtest-all");
+      setBtAllData(d.results || []);
+    } catch(e) { setBtAllErr(e.message); }
+    finally { setBtAllLoad(false); }
+  }, []);
+
+  // fetch IG account + positions
+  const fetchIgData = useCallback(async() => {
+    setIgLoad(true); setIgErr(null);
+    try {
+      const [status, account, pos] = await Promise.all([
+        get("/ig/status"),
+        get("/ig/account"),
+        get("/ig/positions"),
+      ]);
+      setIgStatus(status);
+      if (account.ok) setIgAccount(account.account);
+      else setIgErr(account.error);
+      if (pos.ok) setIgPositions(pos.positions || []);
+    } catch(e) { setIgErr(e.message); }
+    finally { setIgLoad(false); }
+  }, []);
+
+  // Close an open position early. Requires explicit confirmation in the UI before
+  // this is ever called — see the closingDealId state machine in the render below.
+  const closePosition = useCallback(async(pos) => {
+    setCloseLoading(pos.dealId); setCloseErr(null);
+    try {
+      const r = await fetch(`${BASE}/ig/close-position`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ dealId: pos.dealId, direction: pos.direction, size: pos.size, epic: pos.epic })
+      });
+      const d = await r.json();
+      if(!d.ok) throw new Error(d.error || "Falha ao fechar posição");
+      setClosingDealId(null);
+      await fetchIgData(); // refresh positions/balance after close
+    } catch(e) { setCloseErr(e.message); }
+    finally { setCloseLoading(null); }
+  }, [fetchIgData]);
+
   // init
   useEffect(()=>{
     if(_appInitialized) return; // module-level guard — survives double-mount
     _appInitialized = true;
     get("/health").then(setHealth).catch(()=>{});
     doScan();
+    // Silently check IG status/account so the Execute panel can appear in Relatório IA
+    // without requiring the user to visit the Conta IG tab first
+    get("/ig/status").then(setIgStatus).catch(()=>{});
+    get("/ig/account").then(d=>{ if(d.ok) setIgAccount(d.account); }).catch(()=>{});
     // PWA install prompt
     window.addEventListener("beforeinstallprompt", e => {
       e.preventDefault();
@@ -452,6 +729,7 @@ export default function App(){
     hasSwitched.current = true;
     lastLoadedPair.current = null;
     setAP(sym);
+    setBTPair(sym); // keep Backtest dropdown in sync with the top pair selector
     // Don't clear ind/quote/candles immediately — prevents flicker
     // They get replaced when fetchPair completes
     if(tab==="report"){
@@ -467,6 +745,22 @@ export default function App(){
       const d=scanData.find(x=>x.symbol===activePair);
       if(d) genReport(d);
     }
+    if(t==="ig"&&!igAccount&&!igLoad){
+      fetchIgData();
+    }
+  };
+
+  // One-click bridge from a ⭐ qualified signal straight to its AI report — switches
+  // the active pair, jumps to the Relatório IA tab, and triggers generation immediately,
+  // so the qualification badge becomes an actionable shortcut instead of just an indicator.
+  const viewQualifiedReport = (sym) => {
+    hasSwitched.current = true;
+    lastLoadedPair.current = null;
+    setAP(sym);
+    setBTPair(sym);
+    setTab("report");
+    const d = scanData.find(x=>x.symbol===sym);
+    if(d){ setReport(null); genReport(d); }
   };
 
   // derived — scanPair MUST be first (used by atrPips fallback)
@@ -485,11 +779,11 @@ export default function App(){
   const ladder   = atrPips ? computeLadder(atrPips, rsiVal, bull, macdBull, isCryptoActive) : [];
   // For crypto ladder: server already scales the levels — frontend just displays
 
-  const TABS=[["dashboard","📊 Dashboard"],["scanner","📡 Scanner"],["detail","🔍 Indicadores"],["report","🤖 Relatório IA"],["backtest","📈 Backtest"],["guide","📖 Guia"]];
+  const TABS=[["dashboard","📊 Dashboard"],["scanner","📡 Scanner"],["detail","🔍 Indicadores"],["report","🤖 Relatório IA"],["backtest","📈 Backtest"],["guide","📖 Guia"],["ig","💼 Conta IG"]];
 
   return(
     <div style={{minHeight:"100vh",background:"#03060e",color:"#8aaccc",fontFamily:"'Segoe UI',system-ui,sans-serif"}}>
-      <style>{`@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}} @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.6)}70%{box-shadow:0 0 0 8px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}} ::-webkit-scrollbar{width:4px;height:4px} ::-webkit-scrollbar-thumb{background:rgba(26,95,212,.4);border-radius:2px}`}</style>
+      <style>{`@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}} @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.6)}70%{box-shadow:0 0 0 8px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}} @keyframes qualifiedGlow{0%,100%{box-shadow:0 0 4px 0 rgba(34,197,94,.3)}50%{box-shadow:0 0 14px 2px rgba(34,197,94,.7)}} @keyframes qualifiedRowGlow{0%,100%{background-color:rgba(34,197,94,.06)}50%{background-color:rgba(34,197,94,.16)}} ::-webkit-scrollbar{width:4px;height:4px} ::-webkit-scrollbar-thumb{background:rgba(26,95,212,.4);border-radius:2px}`}</style>
       <div style={{position:"fixed",top:0,left:0,right:0,height:2,zIndex:20,background:"linear-gradient(90deg,transparent,#1a5fd4 30%,#0d9488 70%,transparent)"}}/>
       <div style={{position:"fixed",inset:0,zIndex:0,opacity:0.22,backgroundImage:"linear-gradient(rgba(26,95,212,.07) 1px,transparent 1px),linear-gradient(90deg,rgba(26,95,212,.07) 1px,transparent 1px)",backgroundSize:"32px 32px",pointerEvents:"none"}}/>
 
@@ -556,14 +850,45 @@ export default function App(){
           </div>
         )}
 
+        {scanData.length>0&&(()=>{
+          const qualifiedPairs = scanData.filter(s=>isQualified(s, CRYPTO.includes(s.symbol)));
+          if(qualifiedPairs.length===0) return null;
+          return(
+            <div style={{marginBottom:10,padding:"9px 14px",background:"rgba(34,197,94,.1)",border:"1px solid rgba(34,197,94,.35)",borderRadius:8,animation:"qualifiedGlow 1.6s ease-in-out infinite"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                <span style={{fontSize:15}}>⭐</span>
+                <span style={{fontSize:12,fontWeight:700,color:"#22c55e"}}>
+                  {qualifiedPairs.length} {qualifiedPairs.length===1?"par qualificado":"pares qualificados"} agora:
+                </span>
+                {qualifiedPairs.map(p=>(
+                  <button key={p.symbol} onClick={()=>viewQualifiedReport(p.symbol)} style={{padding:"3px 10px",borderRadius:6,border:"1px solid rgba(34,197,94,.5)",background:"rgba(34,197,94,.18)",color:"#c8e0ff",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>
+                    {p.symbol} →
+                  </button>
+                ))}
+              </div>
+              <div style={{fontSize:9,color:"#1a5a4a",marginTop:6}}>
+                Clica num par para abrir o Relatório IA directamente · Critério (forex): 3/3 confluência + sessão ideal + RSI saudável + Pip Ladder ≥{QUALIFY_MIN_LADDER_PROB}% · Critério (crypto): RSI extremo + sessão ideal · GBP/USD e EUR/JPY excluídos (backtest mostra perda histórica)
+              </div>
+            </div>
+          );
+        })()}
+
         {/* PAIR SELECTOR */}
         <div style={{display:"flex",gap:6,marginBottom:16,flexWrap:"wrap"}}>
           {PAIRS.map(p=>{
             const s=scanData.find(x=>x.symbol===p);
+            const qualified = isQualified(s, CRYPTO.includes(p));
             return(
-              <button key={p} onClick={()=>switchPair(p)} style={{padding:"6px 12px",borderRadius:7,border:`1px solid ${activePair===p?"#1a5fd4":"rgba(18,42,78,.7)"}`,background:activePair===p?"rgba(26,95,212,.2)":"rgba(4,10,22,.6)",cursor:"pointer",fontFamily:"inherit",transition:"all .18s",textAlign:"left",minWidth:88}}>
+              <button key={p} onClick={()=>switchPair(p)} style={{padding:"6px 12px",borderRadius:7,border:`1px solid ${qualified?"#22c55e":activePair===p?"#1a5fd4":"rgba(18,42,78,.7)"}`,background:qualified?"rgba(34,197,94,.12)":activePair===p?"rgba(26,95,212,.2)":"rgba(4,10,22,.6)",cursor:"pointer",fontFamily:"inherit",transition:"all .18s",textAlign:"left",minWidth:88,position:"relative",animation:qualified?"qualifiedGlow 1.6s ease-in-out infinite":"none"}}>
+                {qualified&&(
+                  <span
+                    onClick={(e)=>{ e.stopPropagation(); viewQualifiedReport(p); }}
+                    title="Ver Relatório IA"
+                    style={{position:"absolute",top:-8,right:-8,fontSize:15,cursor:"pointer",filter:"drop-shadow(0 0 4px rgba(34,197,94,.8))",zIndex:1}}
+                  >⭐</span>
+                )}
                 <div style={{display:"flex",alignItems:"center",gap:4}}>
-  <span style={{fontSize:12,fontWeight:700,color:activePair===p?"#4da6ff":"#8aaccc"}}>{p}</span>
+  <span style={{fontSize:12,fontWeight:700,color:qualified?"#22c55e":activePair===p?"#4da6ff":"#8aaccc"}}>{p}</span>
   {CRYPTO.includes(p)&&<span style={{fontSize:8,color:"#f59e0b",background:"rgba(245,158,11,.15)",borderRadius:3,padding:"1px 4px"}}>₿</span>}
 </div>
                 {s?<div style={{fontSize:9,color:pCol(s.change_pct),marginTop:1}}>{fmtP(s.change_pct)} · {CRYPTO.includes(p)?`$${s.atr_pips.toLocaleString()}`:s.atr_pips+"p"}</div>
@@ -660,15 +985,17 @@ export default function App(){
                   <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                     <thead>
                       <tr style={{borderBottom:"1px solid #0d2040"}}>
-                        {["Par","Tier","Preço","Variação","ATR (pips)","RSI","Tendência","Volatilidade"].map(h=>(
+                        {["Par","Tier","Preço","Variação","ATR (pips)","RSI","Tendência","Volatilidade","Setup"].map(h=>(
                           <th key={h} style={{padding:"8px 10px",color:"#253a5e",fontWeight:600,textAlign:"left",fontSize:10}}>{h}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {scanData.map((p,i)=>(
-                        <tr key={p.symbol} onClick={()=>switchPair(p.symbol)} style={{borderBottom:"1px solid rgba(13,32,64,.5)",cursor:"pointer",background:i%2===0?"transparent":"rgba(18,42,78,.1)"}}>
-                          <td style={{padding:"9px 10px"}}><span style={{fontWeight:700,color:"#c8e0ff"}}>{p.symbol}</span>{p.tier===1&&<Tag t="T1" color="#4da6ff"/>}</td>
+                      {scanData.map((p,i)=>{
+                        const qualified = isQualified(p, CRYPTO.includes(p.symbol));
+                        return(
+                        <tr key={p.symbol} onClick={()=>switchPair(p.symbol)} style={{borderBottom:"1px solid rgba(13,32,64,.5)",cursor:"pointer",background:qualified?"rgba(34,197,94,.08)":i%2===0?"transparent":"rgba(18,42,78,.1)",animation:qualified?"qualifiedRowGlow 1.6s ease-in-out infinite":"none"}}>
+                          <td style={{padding:"9px 10px"}}><span style={{fontWeight:700,color:qualified?"#22c55e":"#c8e0ff"}}>{p.symbol}</span>{p.tier===1&&<Tag t="T1" color="#4da6ff"/>}</td>
                           <td style={{padding:"9px 10px",color:"#253a5e",fontSize:11}}>Tier {p.tier}</td>
                           <td style={{padding:"9px 10px",color:"#c8e0ff",fontWeight:600}}>{fmt(p.price)}</td>
                           <td style={{padding:"9px 10px",color:pCol(p.change_pct),fontWeight:600}}>{fmtP(p.change_pct)}</td>
@@ -683,8 +1010,17 @@ export default function App(){
                               <span style={{fontSize:10,color:"#253a5e"}}>{CRYPTO.includes(p.symbol)?(p.atr_pips>=500?"Alta":p.atr_pips>=100?"Média":"Baixa"):(p.atr_pips>=80?"Alta":p.atr_pips>=50?"Média":"Baixa")}</span>
                             </div>
                           </td>
+                          <td style={{padding:"9px 10px",textAlign:"center"}}>
+                            {qualified?(
+                              <span
+                                onClick={(e)=>{ e.stopPropagation(); viewQualifiedReport(p.symbol); }}
+                                title="Ver Relatório IA"
+                                style={{fontSize:15,cursor:"pointer",filter:"drop-shadow(0 0 4px rgba(34,197,94,.8))"}}
+                              >⭐</span>
+                            ):<span style={{color:"#1a3a5e",fontSize:11}}>—</span>}
+                          </td>
                         </tr>
-                      ))}
+                      );})}
                     </tbody>
                   </table>
                 </div>
@@ -824,7 +1160,7 @@ export default function App(){
             )}
 
             {/* AI Report */}
-            <AiReport report={report} loading={repLoad} error={repErr} onRefresh={()=>genReport(scanPair)} symbol={activePair}/>
+            <AiReport report={report} loading={repLoad} error={repErr} onRefresh={()=>genReport(scanPair)} symbol={activePair} igAccount={igAccount} igStatus={igStatus}/>
           </div>
         )}
 
@@ -840,12 +1176,103 @@ export default function App(){
                   <div style={{fontSize:11,color:"#1a5a4a"}}>SL = 1.2× ATR · TP1 = 1.8× ATR · TP2 = 3× ATR · {btData?btData.period:"500 dias de histórico"}</div>
                 </div>
                 <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-                  <select value={btPair} onChange={e=>{setBTPair(e.target.value);}} style={{padding:"6px 10px",borderRadius:6,border:"1px solid rgba(18,42,78,.7)",background:"rgba(4,10,22,.9)",color:"#8aaccc",fontSize:11,fontFamily:"inherit"}}>
+                  <select value={btPair} onChange={e=>{setBTPair(e.target.value); setAP(e.target.value);}} style={{padding:"6px 10px",borderRadius:6,border:"1px solid rgba(18,42,78,.7)",background:"rgba(4,10,22,.9)",color:"#8aaccc",fontSize:11,fontFamily:"inherit"}}>
                     {PAIRS.map(p=><option key={p} value={p}>{p}</option>)}
                   </select>
                   <button onClick={()=>fetchBacktest(btPair)} disabled={btLoad} style={{padding:"7px 18px",borderRadius:7,border:"1px solid #0d9488",background:btLoad?"rgba(13,148,136,.06)":"rgba(13,148,136,.18)",color:btLoad?"#1a5040":"#0d9488",fontSize:11,cursor:btLoad?"not-allowed":"pointer",fontFamily:"inherit",fontWeight:700}}>
-                    {btLoad?<><Spin/>A calcular...</>:"▶ Executar Backtest"}
+                    {btLoad?<><Spin/>A calcular...</>:`▶ Executar Backtest (${btPair})`}
                   </button>
+                </div>
+              </div>
+            </C>
+
+            {/* Run ALL 11 pairs at once and compare side by side */}
+            <C style={{borderColor:"rgba(167,139,250,.35)",background:"rgba(167,139,250,.04)"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+                <div>
+                  <L t="🌐 Comparar Todos os Pares" color="#a78bfa" mb={4}/>
+                  <div style={{fontSize:11,color:"#5a4a7a"}}>Corre o backtest nos 11 pares de uma vez — demora ~1-2 min (respeita o rate limit da API)</div>
+                </div>
+                <button onClick={fetchBacktestAll} disabled={btAllLoad} style={{padding:"7px 18px",borderRadius:7,border:"1px solid #a78bfa",background:btAllLoad?"rgba(167,139,250,.06)":"rgba(167,139,250,.18)",color:btAllLoad?"#4a3a6a":"#a78bfa",fontSize:11,cursor:btAllLoad?"not-allowed":"pointer",fontFamily:"inherit",fontWeight:700}}>
+                  {btAllLoad?<><Spin/>A processar 11 pares...</>:"🌐 Executar Todos os Pares"}
+                </button>
+              </div>
+
+              {btAllErr&&<div style={{marginTop:10,padding:"8px 10px",background:"rgba(239,68,68,.1)",borderRadius:6,fontSize:11,color:"#ef4444"}}>⚠️ {btAllErr}</div>}
+
+              {btAllData&&(()=>{
+                const STRAT_KEYS = [
+                  {key:"confluence",  label:"3/3"},
+                  {key:"session",     label:"3/3+Sessão"},
+                  {key:"rsi_extreme", label:"RSI Ext."},
+                  {key:"all_signals", label:"2+ Sinais"},
+                ];
+                return(
+                  <div style={{marginTop:14,overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                      <thead>
+                        <tr style={{borderBottom:"1px solid rgba(167,139,250,.3)"}}>
+                          <th style={{padding:"6px 8px",color:"#5a4a7a",textAlign:"left",fontSize:9}}>Par</th>
+                          {STRAT_KEYS.map(s=>(
+                            <th key={s.key} colSpan={2} style={{padding:"6px 8px",color:"#5a4a7a",textAlign:"center",fontSize:9,borderLeft:"1px solid rgba(167,139,250,.15)"}}>{s.label}</th>
+                          ))}
+                        </tr>
+                        <tr style={{borderBottom:"1px solid rgba(167,139,250,.2)"}}>
+                          <th></th>
+                          {STRAT_KEYS.map(s=>(
+                            <Fragment key={s.key}>
+                              <th style={{padding:"3px 6px",color:"#3a2a5a",fontSize:8,borderLeft:"1px solid rgba(167,139,250,.15)"}}>Trades</th>
+                              <th style={{padding:"3px 6px",color:"#3a2a5a",fontSize:8}}>P&L</th>
+                            </Fragment>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {btAllData.map((r,i)=>{
+                          if(r.error) return(
+                            <tr key={r.symbol} style={{borderBottom:"1px solid rgba(13,32,64,.4)"}}>
+                              <td style={{padding:"7px 8px",fontWeight:700,color:"#c8e0ff"}}>{r.symbol}</td>
+                              <td colSpan={8} style={{padding:"7px 8px",color:"#ef4444",fontSize:10}}>Erro: {r.error}</td>
+                            </tr>
+                          );
+                          return(
+                            <tr key={r.symbol} onClick={()=>{setBT(r);setBTPair(r.symbol);setAP(r.symbol);}} style={{borderBottom:"1px solid rgba(13,32,64,.4)",cursor:"pointer",background:i%2===0?"transparent":"rgba(167,139,250,.03)"}}>
+                              <td style={{padding:"7px 8px",fontWeight:700,color:"#c8e0ff"}}>{r.symbol}</td>
+                              {STRAT_KEYS.map(s=>{
+                                const st = r.stats[s.key];
+                                const pos = st.total_pnl > 0;
+                                return(
+                                  <Fragment key={s.key}>
+                                    <td style={{padding:"7px 6px",textAlign:"center",color:"#5a6a8a",borderLeft:"1px solid rgba(167,139,250,.1)"}}>{st.trades}</td>
+                                    <td style={{padding:"7px 6px",textAlign:"center",fontWeight:700,color:pos?"#22c55e":"#ef4444"}}>{pos?"+":""}{st.total_pnl}p</td>
+                                  </Fragment>
+                                );
+                              })}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    <div style={{marginTop:8,fontSize:9,color:"#3a2a5a"}}>Clica numa linha para carregar esse par nos detalhes abaixo</div>
+                  </div>
+                );
+              })()}
+            </C>
+
+            {/* Capital simulator — translates pip P&L into a real dollar outcome */}
+            <C style={{borderColor:"rgba(77,166,255,.35)",background:"rgba(77,166,255,.04)"}}>
+              <L t="💰 Simulador de Capital — 'Se tivesse investido...'" color="#4da6ff"/>
+              <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.7,marginBottom:10}}>
+                Define o capital inicial e o risco por trade. Calculamos quanto terias ganho ou perdido seguindo esta estratégia nos trades simulados, usando o mesmo método de dimensionamento de posição (risco % do saldo) usado na execução real.
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                <div>
+                  <div style={{fontSize:10,color:"#253a5e",marginBottom:4}}>Capital inicial ($)</div>
+                  <input type="number" value={btCapital} onChange={e=>setBtCapital(parseFloat(e.target.value)||0)} min="1" step="10" style={{width:"100%",padding:"8px 10px",borderRadius:7,border:"1px solid rgba(18,42,78,.7)",background:"rgba(4,10,22,.9)",color:"#c8e0ff",fontSize:13,fontFamily:"inherit"}}/>
+                </div>
+                <div>
+                  <div style={{fontSize:10,color:"#253a5e",marginBottom:4}}>Risco por trade (%)</div>
+                  <input type="number" value={btRiskPct} onChange={e=>setBtRiskPct(parseFloat(e.target.value)||0)} min="0.1" max="10" step="0.1" style={{width:"100%",padding:"8px 10px",borderRadius:7,border:"1px solid rgba(18,42,78,.7)",background:"rgba(4,10,22,.9)",color:"#c8e0ff",fontSize:13,fontFamily:"inherit"}}/>
                 </div>
               </div>
             </C>
@@ -859,6 +1286,25 @@ export default function App(){
                 {key:"rsi_extreme", label:"📊 RSI Extremo",          color:"#f59e0b", desc:"RSI<30 LONG ou RSI>70 SHORT"},
                 {key:"all_signals", label:"⚡ 2+ Sinais",            color:"#a78bfa", desc:"Qualquer 2 confluências"},
               ];
+              const MIN_RELIABLE_TRADES = 15; // below this, win rate / profit factor are not statistically meaningful
+
+              // Capital simulation: walk through each strategy's FULL trade sequence in order,
+              // compounding a fixed % risk per trade off the running balance. A pip P&L is
+              // converted to a $ outcome by sizing each trade so its SL (1.2× ATR) costs exactly
+              // riskPct% of the balance at that point — the same principle as the live ExecutePanel.
+              function simulateCapital(seq){
+                if(!seq || seq.length===0) return {finalBalance:btCapital, totalReturn:0, returnPct:0, trail:[]};
+                let balance = btCapital;
+                const trail = [btCapital];
+                seq.forEach(([pnlPips, atrPips])=>{
+                  const riskAmount = balance * (btRiskPct/100);
+                  const riskPerPip = riskAmount / Math.max(1, atrPips * 1.2); // SL = 1.2×ATR always
+                  balance += pnlPips * riskPerPip;
+                  trail.push(balance);
+                });
+                const totalReturn = balance - btCapital;
+                return { finalBalance: balance, totalReturn, returnPct: (totalReturn/btCapital)*100, trail };
+              }
 
               return(
                 <div style={{display:"grid",gap:14}}>
@@ -868,12 +1314,25 @@ export default function App(){
                     {strategies.map(s=>{
                       const st = btData.stats[s.key];
                       const isPos = st.total_pnl > 0;
+                      const sim = simulateCapital(st.pnl_sequence);
+                      // Flagging is now dynamic per-pair: a strategy is "not recommended" here
+                      // when THIS pair's own backtest shows a net loss — not a fixed global label,
+                      // since the same strategy can lose on one pair and win on another (e.g.
+                      // "2+ Sinais" lost -31% on EUR/USD but gained +23.8% on AUD/USD).
+                      const lostMoney = st.total_pnl < 0;
+                      const smallSample = st.trades < MIN_RELIABLE_TRADES;
                       return(
-                        <C key={s.key} style={{borderColor:s.color+"44"}}>
+                        <C key={s.key} style={{borderColor:lostMoney?"rgba(239,68,68,.3)":s.color+"44",opacity:lostMoney?0.75:1}}>
                           <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
                             <div>
-                              <div style={{fontSize:12,fontWeight:700,color:s.color}}>{s.label}</div>
+                              <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                                <span style={{fontSize:12,fontWeight:700,color:lostMoney?"#9a9aa8":s.color}}>{s.label}</span>
+                                {lostMoney&&<Tag t="⚠️ Perda neste par" color="#ef4444"/>}
+                                {smallSample&&<Tag t={`⚠️ Amostra pequena (${st.trades})`} color="#f59e0b"/>}
+                              </div>
                               <div style={{fontSize:10,color:"#1a3a5e",marginTop:2}}>{s.desc}</div>
+                              {lostMoney&&<div style={{fontSize:9,color:"#ef4444",marginTop:3}}>Backtest mostra perda histórica em {btPair} — não generaliza necessariamente a outros pares</div>}
+                              {smallSample&&<div style={{fontSize:9,color:"#f59e0b",marginTop:3}}>Apenas {st.trades} trade{st.trades===1?"":"s"} — abaixo de {MIN_RELIABLE_TRADES}, win rate e profit factor não são estatisticamente fiáveis</div>}
                             </div>
                             <div style={{textAlign:"right"}}>
                               <div style={{fontSize:22,fontWeight:800,color:isPos?"#22c55e":"#ef4444"}}>{st.win_rate}%</div>
@@ -912,6 +1371,20 @@ export default function App(){
                               </svg>
                             );
                           })()}
+                          {/* Capital simulation — "se tivesse investido $X..." */}
+                          {sim.trail?.length>1&&(
+                            <div style={{marginTop:10,padding:"9px 11px",background:sim.totalReturn>=0?"rgba(34,197,94,.08)":"rgba(239,68,68,.06)",borderRadius:7,border:`1px solid ${sim.totalReturn>=0?"rgba(34,197,94,.25)":"rgba(239,68,68,.2)"}`}}>
+                              <div style={{fontSize:9,color:"#253a5e",marginBottom:3}}>Com ${btCapital.toLocaleString()} a {btRiskPct}% risco/trade →</div>
+                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+                                <span style={{fontSize:15,fontWeight:800,color:sim.totalReturn>=0?"#22c55e":"#ef4444"}}>
+                                  ${sim.finalBalance.toFixed(2)}
+                                </span>
+                                <span style={{fontSize:11,fontWeight:700,color:sim.totalReturn>=0?"#22c55e":"#ef4444"}}>
+                                  {sim.totalReturn>=0?"+":""}{sim.returnPct.toFixed(1)}% ({sim.totalReturn>=0?"+":""}${sim.totalReturn.toFixed(2)})
+                                </span>
+                              </div>
+                            </div>
+                          )}
                         </C>
                       );
                     })}
@@ -1349,6 +1822,123 @@ export default function App(){
               </div>
               <div style={{marginTop:12,fontSize:11,color:"#1a3a5e",lineHeight:1.6,fontStyle:"italic"}}>
                 Quanto mais ✅ no checklist, maior a probabilidade estatística de sucesso. O Relatório IA já faz esta análise automaticamente — usa este guia para entenderes o "porquê" das recomendações.
+              </div>
+            </C>
+
+          </div>
+        )}
+
+        {/* ── CONTA IG ── */}
+        {tab==="ig"&&(
+          <div style={{display:"grid",gap:14}}>
+
+            <C style={{padding:"14px 18px"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+                <div>
+                  <L t="💼 Conta IG — Execução Forex/CFD" color="#4da6ff" mb={4}/>
+                  <div style={{fontSize:11,color:"#1a5a4a"}}>
+                    {igStatus?(igStatus.configured?`Modo: ${igStatus.mode}${igStatus.mode==="DEMO"?" 🟢":" ⚠️"}`:"Credenciais IG não configuradas no .env"):"—"}
+                  </div>
+                </div>
+                <button onClick={fetchIgData} disabled={igLoad} style={{padding:"7px 18px",borderRadius:7,border:"1px solid #4da6ff",background:igLoad?"rgba(77,166,255,.06)":"rgba(77,166,255,.18)",color:igLoad?"#1a3a6e":"#4da6ff",fontSize:11,cursor:igLoad?"not-allowed":"pointer",fontFamily:"inherit",fontWeight:700}}>
+                  {igLoad?<><Spin/>A carregar...</>:"🔄 Actualizar"}
+                </button>
+              </div>
+            </C>
+
+            {igStatus?.mode==="DEMO"&&(
+              <div style={{padding:"8px 14px",background:"rgba(34,197,94,.08)",border:"1px solid rgba(34,197,94,.25)",borderRadius:8,fontSize:11,color:"#22c55e",fontWeight:700,textAlign:"center"}}>
+                🟢 MODO DEMO — dinheiro virtual, zero risco real
+              </div>
+            )}
+            {igStatus?.mode==="LIVE"&&(
+              <div style={{padding:"8px 14px",background:"rgba(239,68,68,.1)",border:"1px solid rgba(239,68,68,.4)",borderRadius:8,fontSize:11,color:"#ef4444",fontWeight:700,textAlign:"center"}}>
+                ⚠️ MODO LIVE — dinheiro real, opera com extremo cuidado
+              </div>
+            )}
+
+            {igErr&&<div style={{background:"rgba(239,68,68,.1)",border:"1px solid rgba(239,68,68,.3)",borderRadius:8,padding:"9px 14px",fontSize:12,color:"#ef4444"}}>⚠️ {igErr}</div>}
+
+            {igLoad&&!igAccount&&<C style={{textAlign:"center",padding:24}}><Spin/><span style={{color:"#253a5e",fontSize:13}}>A ligar à IG...</span></C>}
+
+            {igAccount&&(
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
+                {[
+                  {l:"Saldo",v:`${igAccount.currency} ${igAccount.balance?.toLocaleString()}`,c:"#22c55e"},
+                  {l:"Disponível",v:`${igAccount.currency} ${igAccount.available?.toLocaleString()}`,c:"#4da6ff"},
+                  {l:"Conta",v:igAccount.accountId,c:"#8aaccc"},
+                ].map(k=>(
+                  <C key={k.l} style={{padding:"14px",textAlign:"center"}}>
+                    <div style={{fontSize:18,fontWeight:700,color:k.c}}>{k.v}</div>
+                    <div style={{fontSize:10,color:"#253a5e",marginTop:4}}>{k.l}</div>
+                  </C>
+                ))}
+              </div>
+            )}
+
+            <C>
+              <L t={`📋 Posições Abertas ${igPositions.length>0?`(${igPositions.length})`:""}`}/>
+              {closeErr&&<div style={{marginBottom:10,padding:"8px 10px",background:"rgba(239,68,68,.1)",borderRadius:6,fontSize:11,color:"#ef4444"}}>⚠️ {closeErr}</div>}
+              {igPositions.length===0?(
+                <div style={{textAlign:"center",color:"#253a5e",padding:28,fontSize:12}}>
+                  {igLoad?<><Spin/>A carregar...</>:"Sem posições abertas neste momento"}
+                </div>
+              ):(
+                <div style={{overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                    <thead>
+                      <tr style={{borderBottom:"1px solid #0d2040"}}>
+                        {["Instrumento","Direcção","Tamanho","Abertura","SL","TP","P&L","Acção"].map(h=>(
+                          <th key={h} style={{padding:"8px 10px",color:"#253a5e",fontWeight:600,textAlign:"left",fontSize:10}}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {igPositions.map((p,i)=>{
+                        const pos = p.position; const mkt = p.market;
+                        const dealId = pos?.dealId;
+                        const isConfirming = closingDealId === dealId;
+                        const isClosing = closeLoading === dealId;
+                        return(
+                          <tr key={i} style={{borderBottom:"1px solid rgba(13,32,64,.5)",background:i%2===0?"transparent":"rgba(18,42,78,.1)"}}>
+                            <td style={{padding:"9px 10px",fontWeight:700,color:"#c8e0ff"}}>{mkt?.instrumentName||pos?.epic}</td>
+                            <td style={{padding:"9px 10px",color:pos?.direction==="BUY"?"#22c55e":"#ef4444",fontWeight:700}}>{pos?.direction==="BUY"?"📈 COMPRA":"📉 VENDA"}</td>
+                            <td style={{padding:"9px 10px",color:"#c8e0ff"}}>{pos?.size}</td>
+                            <td style={{padding:"9px 10px",color:"#c8e0ff"}}>{pos?.level}</td>
+                            <td style={{padding:"9px 10px",color:"#ef4444"}}>{pos?.stopLevel||"—"}</td>
+                            <td style={{padding:"9px 10px",color:"#22c55e"}}>{pos?.limitLevel||"—"}</td>
+                            <td style={{padding:"9px 10px",fontWeight:700,color:(mkt?.bid-pos?.level)*(pos?.direction==="BUY"?1:-1)>0?"#22c55e":"#ef4444"}}>
+                              {mkt?.bid?((mkt.bid-pos.level)*(pos.direction==="BUY"?1:-1)).toFixed(4):"—"}
+                            </td>
+                            <td style={{padding:"9px 10px"}}>
+                              {!isConfirming?(
+                                <button onClick={()=>setClosingDealId(dealId)} disabled={isClosing} style={{padding:"5px 12px",borderRadius:6,border:"1px solid rgba(239,68,68,.4)",background:"rgba(239,68,68,.1)",color:"#ef4444",fontSize:11,cursor:"pointer",fontFamily:"inherit",fontWeight:700}}>
+                                  Fechar
+                                </button>
+                              ):(
+                                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                                  <span style={{fontSize:10,color:"#f59e0b"}}>Confirmar?</span>
+                                  <button onClick={()=>closePosition(pos)} disabled={isClosing} style={{padding:"5px 10px",borderRadius:6,border:"1px solid #ef4444",background:"#ef4444",color:"#03060e",fontSize:11,cursor:isClosing?"not-allowed":"pointer",fontFamily:"inherit",fontWeight:700}}>
+                                    {isClosing?<Spin/>:"Sim"}
+                                  </button>
+                                  <button onClick={()=>setClosingDealId(null)} disabled={isClosing} style={{padding:"5px 10px",borderRadius:6,border:"1px solid rgba(18,42,78,.7)",background:"transparent",color:"#8aaccc",fontSize:11,cursor:"pointer",fontFamily:"inherit"}}>
+                                    Não
+                                  </button>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </C>
+
+            <C style={{borderColor:"rgba(13,148,136,.3)",background:"rgba(13,148,136,.04)"}}>
+              <div style={{fontSize:11,color:"#5fb8ad",lineHeight:1.7}}>
+                ℹ️ <strong>Execução e fecho de posições já disponíveis.</strong> Abre ordens a partir do Relatório IA (quando a recomendação for COMPRAR/VENDER) e fecha posições antecipadamente aqui mesmo, em qualquer momento.
               </div>
             </C>
 
