@@ -128,6 +128,66 @@ function PipLadder({ladder,dir,isCrypto=false}){
   );
 }
 
+// ── CANDLESTICK MINI-CHART ───────────────────────────────────────────────────────
+// Real OHLC candlestick rendering (body + wicks), not a line chart — shows the
+// recent "shape" of price action so a single detected pattern has visual context
+// instead of being read in isolation. Candles with detected patterns get a 🕯️
+// marker above them and a coloured outline matching the pattern's bias.
+function CandleChart({candles, isJpy=false}){
+  if(!candles || candles.length===0) return null;
+
+  const W = 600, H = 220, padTop = 28, padBottom = 24, padX = 8;
+  const plotH = H - padTop - padBottom;
+  const n = candles.length;
+  const candleW = (W - padX*2) / n;
+  const bodyW = Math.max(2, candleW * 0.55);
+
+  const allHighs = candles.map(c=>c.high);
+  const allLows = candles.map(c=>c.low);
+  const maxP = Math.max(...allHighs);
+  const minP = Math.min(...allLows);
+  const range = (maxP - minP) || 1;
+  const yOf = p => padTop + (1 - (p - minP) / range) * plotH;
+  const fmtP = p => isJpy ? p.toFixed(2) : p.toFixed(4);
+
+  return(
+    <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} style={{display:"block"}}>
+      {/* grid lines: high/low reference */}
+      <line x1={padX} y1={padTop} x2={W-padX} y2={padTop} stroke="rgba(255,255,255,.08)" strokeDasharray="3 3"/>
+      <line x1={padX} y1={H-padBottom} x2={W-padX} y2={H-padBottom} stroke="rgba(255,255,255,.08)" strokeDasharray="3 3"/>
+      <text x={padX} y={padTop-6} fontSize="9" fill="#253a5e">{fmtP(maxP)}</text>
+      <text x={padX} y={H-padBottom+14} fontSize="9" fill="#253a5e">{fmtP(minP)}</text>
+
+      {candles.map((c,i)=>{
+        const cx = padX + candleW*i + candleW/2;
+        const isUp = c.close >= c.open;
+        const color = isUp ? "#22c55e" : "#ef4444";
+        const yHigh = yOf(c.high), yLow = yOf(c.low);
+        const yOpen = yOf(c.open), yClose = yOf(c.close);
+        const bodyTop = Math.min(yOpen, yClose);
+        const bodyH = Math.max(1, Math.abs(yClose - yOpen));
+        const hasPattern = c.patterns?.length > 0;
+        const patternBias = hasPattern ? c.patterns[0].bias : null;
+        const markerColor = patternBias?.startsWith("bullish") ? "#22c55e" : patternBias?.startsWith("bearish") ? "#ef4444" : "#f59e0b";
+
+        return(
+          <g key={i}>
+            {/* wick */}
+            <line x1={cx} y1={yHigh} x2={cx} y2={yLow} stroke={color} strokeWidth="1" opacity={hasPattern?1:0.7}/>
+            {/* body */}
+            <rect x={cx-bodyW/2} y={bodyTop} width={bodyW} height={bodyH} fill={color} opacity={hasPattern?1:0.75}
+              stroke={hasPattern?markerColor:"none"} strokeWidth={hasPattern?1.5:0}/>
+            {/* pattern marker */}
+            {hasPattern && (
+              <text x={cx} y={padTop-12} fontSize="11" textAnchor="middle">🕯️</text>
+            )}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 // ── EXECUTE ORDER PANEL ────────────────────────────────────────────────────────
 function ExecutePanel({symbol, direction, entryPrice, stopPrice, limitPrice, igAccount, igStatus, isCrypto}){
   const [sizingMode,setSizingMode] = useState("risk"); // "risk" | "fixed"
@@ -161,9 +221,20 @@ function ExecutePanel({symbol, direction, entryPrice, stopPrice, limitPrice, igA
   const CONTRACT_SIZE = 100000; // confirmed for USD/CHF; standard for most forex CFD majors on IG
   const calcUnits = riskDistance > 0 ? riskAmount / riskDistance : 0;
   const calcContracts = calcUnits / CONTRACT_SIZE;
+  const MIN_CONTRACT_SIZE = 0.1; // IG's minDealSize for forex CFDs
   // IG's minDealSize for forex CFDs is typically 0.1 contracts — round to 2 decimals and
   // floor at that minimum so we never submit a size IG will reject as too small either.
-  const size = Math.max(0.1, Math.round(calcContracts * 100) / 100);
+  const size = Math.max(MIN_CONTRACT_SIZE, Math.round(calcContracts * 100) / 100);
+  // Ajuste 4 (2026-06-30): when the calculated size falls below IG's 0.1 minimum, we
+  // silently floor it to 0.1 — but that means the REAL risk if SL is hit is higher
+  // than what the user actually asked for, and until now there was no indication of
+  // this anywhere in the UI. A small account + wide SL combination (common on
+  // low-volatility pairs or small risk %) can trigger this without the user noticing,
+  // turning a "1% risk" request into something silently larger. Compute and expose
+  // the realized risk so the confirmation step can warn explicitly.
+  const sizeWasFloored = calcContracts > 0 && calcContracts < MIN_CONTRACT_SIZE;
+  const realizedRiskAmount = size * riskDistance * CONTRACT_SIZE;
+  const riskInflationPct = riskAmount > 0 ? ((realizedRiskAmount - riskAmount) / riskAmount) * 100 : 0;
 
   const dirIG = direction === "LONG" ? "BUY" : "SELL";
   const rc = direction === "LONG" ? "#22c55e" : "#ef4444";
@@ -234,12 +305,32 @@ function ExecutePanel({symbol, direction, entryPrice, stopPrice, limitPrice, igA
 
           <div style={{padding:"10px 12px",background:"rgba(10,20,40,.5)",borderRadius:8,marginBottom:12}}>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:11}}>
-              <div><span style={{color:"#253a5e"}}>Risco em $:</span> <strong style={{color:"#ef4444"}}>{igAccount?.currency} {riskAmount.toFixed(2)}</strong></div>
+              <div>
+                <span style={{color:"#253a5e"}}>Risco {sizeWasFloored?"real":"em $"}:</span>{" "}
+                <strong style={{color:"#ef4444"}}>{igAccount?.currency} {realizedRiskAmount.toFixed(2)}</strong>
+                {sizeWasFloored&&<span style={{fontSize:9,color:"#1a3a5e"}}> (pedido: {riskAmount.toFixed(2)})</span>}
+              </div>
               <div><span style={{color:"#253a5e"}}>Tamanho:</span> <strong style={{color:"#c8e0ff"}}>{size} contratos</strong> <span style={{color:"#1a3a5e",fontSize:9}}>(≈{(size*CONTRACT_SIZE).toLocaleString()} unidades nocionais)</span></div>
               <div><span style={{color:"#253a5e"}}>Entrada:</span> <strong style={{color:"#c8e0ff"}}>{entryPrice}</strong></div>
               <div><span style={{color:"#253a5e"}}>SL:</span> <strong style={{color:"#ef4444"}}>{stopPrice}</strong></div>
             </div>
           </div>
+
+          {/* Ajuste 4 (2026-06-30): warn explicitly when IG's 0.1 minimum contract size
+              forces a larger position than the requested risk — without this, a small
+              account or wide SL combination could silently risk far more than intended
+              (e.g. requesting $2 risk but actually risking $20 — a 900% inflation, confirmed
+              via testing). This must be visible BEFORE confirmation, not buried in fine print. */}
+          {sizeWasFloored&&(
+            <div style={{marginBottom:12,padding:"10px 12px",background:"rgba(245,158,11,.1)",border:"1px solid rgba(245,158,11,.4)",borderRadius:8}}>
+              <div style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                <span style={{fontSize:14,flexShrink:0}}>⚠️</span>
+                <div style={{fontSize:11,color:"#f59e0b",lineHeight:1.7}}>
+                  <strong>Risco real maior que o pedido.</strong> A IG exige um tamanho mínimo de {MIN_CONTRACT_SIZE} contratos — o cálculo deu um valor menor, por isso o risco real ({igAccount?.currency} {realizedRiskAmount.toFixed(2)}) é {riskInflationPct.toFixed(0)}% superior ao que escolheste ({igAccount?.currency} {riskAmount.toFixed(2)}). Considera aumentar o capital ou usar um par com SL mais apertado.
+                </div>
+              </div>
+            </div>
+          )}
 
           <button onClick={()=>setConfirming(true)} disabled={!igAccount||size<=0} style={{width:"100%",padding:"10px",borderRadius:8,border:`1px solid ${rc}`,background:rc+"22",color:rc,fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>
             {direction==="LONG"?"🟢 Preparar COMPRA":"🔴 Preparar VENDA"}
@@ -254,9 +345,14 @@ function ExecutePanel({symbol, direction, entryPrice, stopPrice, limitPrice, igA
             <div style={{fontSize:12,color:"#c8e0ff",lineHeight:1.8}}>
               <strong>{dirIG}</strong> {size} contratos de {symbol} @ MARKET<br/>
               SL: {stopPrice} · TP: {limitPrice||"—"}<br/>
-              Risco: {igAccount?.currency} {riskAmount.toFixed(2)} ({sizingMode==="risk"?`${riskPct}% do saldo`:"valor fixo"})
+              Risco {sizeWasFloored?"real":""}: {igAccount?.currency} {realizedRiskAmount.toFixed(2)} ({sizingMode==="risk"?`${riskPct}% do saldo`:"valor fixo"})
             </div>
           </div>
+          {sizeWasFloored&&(
+            <div style={{marginBottom:12,padding:"9px 12px",background:"rgba(245,158,11,.1)",border:"1px solid rgba(245,158,11,.4)",borderRadius:8,fontSize:11,color:"#f59e0b",lineHeight:1.7}}>
+              ⚠️ Tamanho mínimo da IG ({MIN_CONTRACT_SIZE} contratos) excede o pedido — vais arriscar {riskInflationPct.toFixed(0)}% mais do que {igAccount?.currency} {riskAmount.toFixed(2)} originalmente escolhido.
+            </div>
+          )}
           {execErr&&<div style={{padding:"8px 10px",background:"rgba(239,68,68,.1)",borderRadius:6,fontSize:11,color:"#ef4444",marginBottom:10}}>⚠️ {execErr}</div>}
           <div style={{display:"flex",gap:8}}>
             <button onClick={()=>setConfirming(false)} disabled={executing} style={{flex:1,padding:"10px",borderRadius:8,border:"1px solid rgba(18,42,78,.7)",background:"transparent",color:"#8aaccc",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>Cancelar</button>
@@ -293,7 +389,7 @@ function AiReport({report,loading,error,onRefresh,symbol,igAccount,igStatus}){
   );
   if(!report) return null;
 
-  const {recommendation,direction,action,confidence,verdict,summary,session_analysis,volume_analysis,institutional,entry,stop_loss:sl_raw,take_profits,risks,checklist,risk_reward,macro_warning,macro_events,candlestick_analysis,candle_patterns} = report;
+  const {recommendation,direction,action,confidence,verdict,summary,session_analysis,volume_analysis,institutional,entry,stop_loss:sl_raw,take_profits,risks,checklist,risk_reward,macro_warning,macro_events,candlestick_analysis,candle_patterns,candle_history,forced_wait_reasons,backtest_caution,crypto_rsi_guidance} = report;
   // Sanitise to prevent number leak as invisible text nodes
   const stop_loss = sl_raw ? {...sl_raw, price: String(sl_raw.price||"—"), pips: sl_raw.pips||"—"} : null;
   const isRec = recommendation==="RECOMENDADO";
@@ -322,6 +418,51 @@ function AiReport({report,loading,error,onRefresh,symbol,igAccount,igStatus}){
           {action==="COMPRAR"?"Abrir posição LONG (comprado)":action==="VENDER"?"Abrir posição SHORT (vendido)":"Não entrar neste momento"}
         </div>
       </C>
+
+      {/* Forced-AGUARDAR badge — code-level rule fired, not the AI's own judgement call */}
+      {forced_wait_reasons?.length>0&&(
+        <C style={{background:"rgba(239,68,68,.08)",borderColor:"rgba(239,68,68,.4)",padding:"12px 16px"}}>
+          <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+            <span style={{fontSize:16,flexShrink:0}}>🛑</span>
+            <div>
+              <div style={{fontSize:11,fontWeight:700,color:"#ef4444",marginBottom:4}}>AGUARDAR forçado por regra automática (não é opinião da IA)</div>
+              <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                {forced_wait_reasons.map((r,i)=>(<div key={i}>• {r}</div>))}
+              </div>
+            </div>
+          </div>
+        </C>
+      )}
+
+      {/* Backtest caution badge — persistent on GBP/USD and EUR/JPY regardless of
+          action, since the confidence cap (≤55) applies even on positive recommendations */}
+      {backtest_caution&&(
+        <C style={{background:"rgba(245,158,11,.07)",borderColor:"rgba(245,158,11,.35)",padding:"12px 16px"}}>
+          <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+            <span style={{fontSize:16,flexShrink:0}}>📉</span>
+            <div>
+              <div style={{fontSize:11,fontWeight:700,color:"#f59e0b",marginBottom:4}}>Par com histórico de backtest desfavorável — confiança limitada a 55%</div>
+              <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.7}}>{backtest_caution}</div>
+            </div>
+          </div>
+        </C>
+      )}
+
+      {/* Crypto RSI guidance badge — informational on all crypto reports; turns red
+          when RSI is in the neutral zone that triggers forced AGUARDAR (Ajuste 3) */}
+      {crypto_rsi_guidance&&(
+        <C style={{background:crypto_rsi_guidance.rsi_neutral?"rgba(239,68,68,.08)":"rgba(167,139,250,.06)",borderColor:crypto_rsi_guidance.rsi_neutral?"rgba(239,68,68,.4)":"rgba(167,139,250,.3)",padding:"12px 16px"}}>
+          <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+            <span style={{fontSize:16,flexShrink:0}}>{crypto_rsi_guidance.rsi_neutral?"🛑":"₿"}</span>
+            <div>
+              <div style={{fontSize:11,fontWeight:700,color:crypto_rsi_guidance.rsi_neutral?"#ef4444":"#a78bfa",marginBottom:4}}>
+                {crypto_rsi_guidance.rsi_neutral?"AGUARDAR forçado — RSI em zona neutra para crypto":"Critério crypto: RSI Extremo prioritário"}
+              </div>
+              <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.7}}>{crypto_rsi_guidance.message}</div>
+            </div>
+          </div>
+        </C>
+      )}
 
       {/* Verdict */}
       <C style={{background:rc+"0d",borderColor:rc+"44",padding:"18px 20px"}}>
@@ -426,12 +567,26 @@ function AiReport({report,loading,error,onRefresh,symbol,igAccount,igStatus}){
 
       {/* Candlestick patterns — additional context, not part of 3/3 confluence */}
       <C style={{borderColor: candle_patterns?.length>0 ? "rgba(167,139,250,.35)" : undefined, background: candle_patterns?.length>0 ? "rgba(167,139,250,.04)" : undefined}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:candle_patterns?.length>0?10:0}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
           <L t="🕯️ Padrões de Candlestick" color={candle_patterns?.length>0?"#a78bfa":undefined} mb={0}/>
           <Tag t="Contexto extra" color="#6a6a78"/>
         </div>
+
+        {/* Visual mini-chart: last 15 candles with pattern markers */}
+        {candle_history?.candles?.length>0&&(
+          <div style={{marginBottom:14}}>
+            <CandleChart candles={candle_history.candles} isJpy={symbol?.includes("JPY")}/>
+            {candle_history.trend_summary&&(
+              <div style={{marginTop:8,padding:"8px 11px",background:"rgba(167,139,250,.06)",borderRadius:7,fontSize:11,color:"#a78bfa",lineHeight:1.6}}>
+                📊 {candle_history.trend_summary}
+              </div>
+            )}
+          </div>
+        )}
+
         {candle_patterns?.length>0?(
           <div style={{display:"grid",gap:8}}>
+            <div style={{fontSize:10,color:"#253a5e",marginBottom:-2}}>Vela mais recente:</div>
             {candle_patterns.map((p,i)=>{
               const isBullish = p.bias.startsWith("bullish");
               const pc = isBullish?"#22c55e":p.bias.startsWith("bearish")?"#ef4444":"#f59e0b";
@@ -1525,7 +1680,27 @@ export default function App(){
                 ))}
               </div>
               <div style={{marginTop:12,padding:"10px 12px",background:"rgba(167,139,250,.08)",borderRadius:8,fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
-                <strong style={{color:"#a78bfa"}}>Onde ver:</strong> Coluna "Velas" no Scanner (🕯️ + número de padrões detectados), e secção dedicada no Relatório IA de cada par — onde a IA comenta explicitamente se o padrão confirma ou contradiz a tendência técnica.
+                <strong style={{color:"#a78bfa"}}>Onde ver:</strong> Coluna "Velas" no Scanner (🕯️ + número de padrões detectados), e secção dedicada no Relatório IA de cada par — com um mini-gráfico visual das últimas 15 velas (corpo + pavios reais, não linha), resumo de tendência da janela, e comentário da IA sobre se o padrão confirma ou contradiz a estrutura técnica.
+              </div>
+            </C>
+
+            {/* Real case study — GBP/USD SL hit, validated the need for candlestick context */}
+            <C glow style={{borderColor:"rgba(239,68,68,.4)"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                <L t="📌 Caso Real — GBP/USD 29/06" color="#ef4444" mb={0}/>
+                <Tag t="Conta demo · Aprendizagem" color="#22c55e"/>
+              </div>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.85,marginBottom:12}}>
+                A 29/06, entrámos <strong style={{color:"#ef4444"}}>SHORT em GBP/USD</strong> a 1.3236 (confiança 72%, 3/3 confluência na altura) — a posição fechou por <strong style={{color:"#ef4444"}}>Stop Loss</strong> no dia seguinte. Esta funcionalidade de candlestick ainda não existia nesse momento.
+              </div>
+              <div style={{padding:"12px 14px",background:"rgba(239,68,68,.06)",borderRadius:8,border:"1px solid rgba(239,68,68,.2)",marginBottom:12}}>
+                <div style={{fontSize:11,fontWeight:700,color:"#ef4444",marginBottom:6}}>O que descobrimos ao reconstruir a análise depois:</div>
+                <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                  A janela de candles à volta dessa entrada continha um <strong style={{color:"#c8e0ff"}}>Hammer (Martelo)</strong> — padrão bullish de rejeição de mínimos — exactamente a contradizer a tendência bearish que motivou a entrada SHORT. Gerando o mesmo relatório hoje, com candlestick activo, a IA reduz a confiança para 35% e recomenda <strong style={{color:"#f59e0b"}}>AGUARDAR</strong> citando precisamente essa divergência.
+                </div>
+              </div>
+              <div style={{fontSize:11,color:"#22c55e",lineHeight:1.7,padding:"10px 12px",background:"rgba(34,197,94,.06)",borderRadius:8,border:"1px solid rgba(34,197,94,.2)"}}>
+                <strong>Porque isto é uma boa notícia, não má:</strong> estamos em conta demo precisamente para encontrar e corrigir este tipo de lacuna sem custo real. Este caso motivou directamente a construção da análise de candlestick — a app melhora com cada trade, vencedor ou perdedor.
               </div>
             </C>
 

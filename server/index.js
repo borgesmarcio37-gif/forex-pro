@@ -329,6 +329,58 @@ function detectCandlePatterns(bars) {
   return patterns;
 }
 
+// Scans the last N bars (default 15) and detects patterns on EACH bar individually
+// (not just the most recent), returning the full OHLC sequence plus where patterns
+// occurred — this powers the visual mini-chart and a short trend narrative, giving
+// context beyond "today's single pattern" so the user can see the recent "shape"
+// of price action, not just an isolated signal.
+function analyzeCandleHistory(bars, count = 15) {
+  if (!bars || bars.length < count + 3) return { candles: [], patternHits: [], trendSummary: "" };
+
+  const recent = bars.slice(-count);
+  const candles = recent.map((b, i) => {
+    // detectCandlePatterns needs 3 trailing bars ending at the candle being evaluated —
+    // reuse the full `bars` array (not just `recent`) so the first few candles in the
+    // window still have correct prior-bar context instead of being artificially truncated.
+    const absoluteIdx = bars.length - count + i;
+    const windowEnd = absoluteIdx + 1;
+    const window = bars.slice(Math.max(0, windowEnd - 10), windowEnd); // up to 10 bars of context
+    const patternsHere = window.length >= 3 ? detectCandlePatterns(window) : [];
+    return { ...b, patterns: patternsHere };
+  });
+
+  const patternHits = candles
+    .map((c, i) => ({ index: i, date: c.date, patterns: c.patterns }))
+    .filter(c => c.patterns.length > 0);
+
+  // Simple trend narrative: count up/down closes, net change, and how many
+  // bullish vs bearish patterns occurred in the window.
+  let upDays = 0, downDays = 0;
+  for (let i = 1; i < recent.length; i++) {
+    if (recent[i].close > recent[i-1].close) upDays++;
+    else if (recent[i].close < recent[i-1].close) downDays++;
+  }
+  const netChangePct = ((recent[recent.length-1].close - recent[0].close) / recent[0].close) * 100;
+  const bullishPatternCount = patternHits.reduce((s,h) => s + h.patterns.filter(p=>p.bias.startsWith("bullish")).length, 0);
+  const bearishPatternCount = patternHits.reduce((s,h) => s + h.patterns.filter(p=>p.bias.startsWith("bearish")).length, 0);
+
+  let trendSummary;
+  if (Math.abs(netChangePct) < 0.3) {
+    trendSummary = `Últimas ${count} velas em range lateral (${netChangePct>=0?"+":""}${netChangePct.toFixed(2)}%) — ${upDays} dias de alta, ${downDays} de baixa.`;
+  } else if (netChangePct > 0) {
+    trendSummary = `Tendência de alta nas últimas ${count} velas (${netChangePct>=0?"+":""}${netChangePct.toFixed(2)}%) — ${upDays} dias de alta vs ${downDays} de baixa.`;
+  } else {
+    trendSummary = `Tendência de baixa nas últimas ${count} velas (${netChangePct.toFixed(2)}%) — ${downDays} dias de baixa vs ${upDays} de alta.`;
+  }
+  if (bullishPatternCount > bearishPatternCount) {
+    trendSummary += ` ${bullishPatternCount} padrão(ões) bullish detectado(s) na janela vs ${bearishPatternCount} bearish.`;
+  } else if (bearishPatternCount > bullishPatternCount) {
+    trendSummary += ` ${bearishPatternCount} padrão(ões) bearish detectado(s) na janela vs ${bullishPatternCount} bullish.`;
+  }
+
+  return { candles, patternHits, trendSummary, netChangePct: Math.round(netChangePct*100)/100, upDays, downDays };
+}
+
 // ── SESSIONS ──────────────────────────────────────────────────────────────────
 const SESSIONS = {
   "EUR/USD": { best:["Londres 07h–10h","NY AM 13h30–16h"],   avoid:"Asiática (00h–07h)",  notes:"Máxima liquidez na sobreposição Londres/NY" },
@@ -615,6 +667,62 @@ app.post("/api/report", async (req, res) => {
   const bull=trend==="bull", mb=(macd?.hist||0)>0;
   const patterns = candle_patterns || []; // reuse what /api/scan already computed — avoids a redundant API call
 
+  // Ajuste 1 (2026-06-30): a strong candlestick pattern (Engulfing or Morning/Evening
+  // Star — the two "forte" tier patterns) whose bias directly opposes the technical
+  // trend direction now DETERMINISTICALLY forces AGUARDAR, the same way an imminent
+  // Major macro event already does. This was motivated by a real GBP/USD SHORT entry
+  // on 2026-06-29 that hit SL — reconstructing the report afterwards showed a Hammer
+  // contradicting the entry, but candlestick wasn't built yet so it had no gating
+  // power, only descriptive text. Relying on the AI to *read* the contradiction in the
+  // prompt and choose AGUARDAR isn't reliable enough on its own — this makes it a hard
+  // rule, not a suggestion, exactly like the macro-event gate below.
+  const oppositeBias = bull ? "bearish" : "bullish";
+  const hasStrongContraryPattern = patterns.some(p => p.strength === "forte" && p.bias.startsWith(oppositeBias));
+
+  // Ajuste 2 (2026-06-30): the 11-pair backtest run on 2026-06-29 showed Confluência
+  // 3/3 LOSES consistently and with large samples on these two pairs specifically —
+  // GBP/USD (PF 0.74, -11.4%, 63 trades) and EUR/JPY (PF 0.59, -18.0%, 75 trades).
+  // The ⭐ qualification system already excludes them entirely (see
+  // QUALIFY_EXCLUDED_PAIRS in App.jsx), but until now the AI report itself had no
+  // awareness of this — it could (and did, on 2026-06-29) recommend a confident
+  // COMPRAR/VENDER on GBP/USD with only 3/3 confluence, the exact setup that loses
+  // historically. This raises the bar specifically for these two pairs: require the
+  // SAME 3/3 confluence as elsewhere PLUS an additional explicit caution layer in the
+  // prompt, and deterministically cap confidence so a "RECOMENDADO" here can never
+  // read as equally trustworthy as a recommendation on a pair the backtest supports.
+  const BACKTEST_CAUTION_PAIRS = {
+    "GBP/USD": "Backtest (2026-06-29, 63 trades): Confluência 3/3 perde -11.4% historicamente neste par (profit factor 0.74).",
+    "EUR/JPY": "Backtest (2026-06-29, 75 trades): Confluência 3/3 perde -18.0% historicamente neste par (profit factor 0.59, o pior de todos os 11 pares testados).",
+  };
+  const backtestCaution = BACKTEST_CAUTION_PAIRS[symbol] || null;
+
+  // Ajuste 3 (2026-06-30): the same backtest showed Confluência 3/3 LOSES on all
+  // three crypto pairs (BTC -12.3%/PF0.30, ETH -20.6%/PF0.00, SOL -13.5%/PF0.11),
+  // while RSI Extremo (RSI≤30 or ≥70) WINS on all three (PF 1.38-1.47 — remarkably
+  // consistent). The ⭐ qualification system already uses RSI Extremo as the crypto
+  // path instead of confluence (see isQualified() in App.jsx), but the AI report
+  // itself was still treating crypto identically to forex — same 3/3-confluence
+  // framing throughout the prompt. This adds a crypto-specific instruction so the
+  // report's own reasoning matches what we already know works for these three pairs,
+  // rather than chasing a confluence signal that has a proven negative edge here.
+  const cryptoGuidance = ["BTC/USD","ETH/USD","SOL/USD"].includes(symbol)
+    ? `Para pares CRYPTO (confirmado por backtest 2026-06-29): Confluência 3/3 PERDE consistentemente em BTC/USD (-12.3%, PF 0.30), ETH/USD (-20.6%, PF 0.00) e SOL/USD (-13.5%, PF 0.11). RSI Extremo (RSI≤30 ou RSI≥70) GANHA consistentemente nos três (PF 1.38-1.47). Para este par, prioriza RSI extremo como critério principal de entrada — só recomenda COMPRAR/VENDER se RSI estiver em zona extrema (≤30 ou ≥70) na direcção coerente com a entrada, mesmo que a confluência técnica das EMAs/MACD pareça forte. Se RSI estiver em zona neutra (35-65), trata isso como motivo para AGUARDAR independentemente de outros sinais.`
+    : null;
+
+  // Fetch the last ~20 candles (with pattern detection per-candle) for the visual
+  // mini-chart + trend narrative. Reuses td()'s cache, so this is usually a free
+  // cache hit right after a scan rather than a fresh API call.
+  let candleHistory = { candles: [], patternHits: [], trendSummary: "" };
+  try {
+    const d = await td("/time_series", { symbol, interval:"1day", outputsize:500 });
+    const raw = [...d.values].reverse();
+    const bars = raw.map(v => ({
+      date: v.datetime, open: parseFloat(v.open), high: parseFloat(v.high),
+      low: parseFloat(v.low), close: parseFloat(v.close),
+    }));
+    candleHistory = analyzeCandleHistory(bars, 15);
+  } catch(e) { console.error("[report] candle history fetch failed:", e.message); }
+
   // Fetch real macro events for this pair's currencies (next 48h)
   let macroEvents = [];
   try {
@@ -696,6 +804,21 @@ ${patterns.length > 0
   ? patterns.map(p => `[${p.strength.toUpperCase()}] ${p.name} — viés ${p.bias} — ${p.desc}`).join("\n")
   : "Nenhum padrão de candlestick relevante identificado na vela mais recente."}
 ${patterns.some(p=>p.bias.includes(bull?"bearish":"bullish")) ? "\n⚠️ Atenção: padrão de candlestick detectado aponta na direcção OPOSTA à tendência técnica — menciona esta divergência explicitamente na análise." : ""}
+${hasStrongContraryPattern ? `\n⚠️⚠️ REGRA OBRIGATÓRIA: Padrão de candlestick FORTE (Engulfing ou Star) com viés ${oppositeBias} contradiz directamente a direcção ${bull?"LONG":"SHORT"} sugerida pela tendência. Isto FORÇA "action":"AGUARDAR" e "confidence"≤40, independentemente de quantas confluências técnicas estejam alinhadas. Caso real que motivou esta regra: entrada SHORT em GBP/USD a 29/06 ignorou um Hammer contrário e fechou em SL.` : ""}
+${candleHistory.trendSummary ? `\nContexto das últimas 15 velas: ${candleHistory.trendSummary}` : ""}
+${candleHistory.patternHits?.length>1 ? `Padrões adicionais detectados na janela recente (não só hoje): ${candleHistory.patternHits.map(h=>h.patterns.map(p=>p.name).join("+")).join(", ")} — considera isto como reforço ou contradição da narrativa actual.` : ""}
+
+${backtestCaution ? `═══════════════════════════════════════════════════════
+⚠️ AVISO DE BACKTEST — PAR DE RISCO ELEVADO COMPROVADO
+═══════════════════════════════════════════════════════
+${backtestCaution}
+REGRA OBRIGATÓRIA: Neste par específico, RECOMENDADO exige ≥3 confluências SEM excepção (não aceitar 2/3 mesmo com outros factores fortes), e "confidence" nunca pode exceder 55 mesmo num cenário perfeito — a evidência histórica deste par já demonstrou que confluência técnica forte não é suficiente para garantir sucesso aqui. Menciona este aviso de backtest explicitamente no "verdict" e nos "risks".
+` : ""}
+${cryptoGuidance ? `═══════════════════════════════════════════════════════
+₿ ORIENTAÇÃO ESPECÍFICA PARA CRYPTO — RSI EXTREMO PRIORITÁRIO
+═══════════════════════════════════════════════════════
+${cryptoGuidance}
+` : ""}
 
 ═══════════════════════════════════════════════════════
 ANÁLISE INSTITUCIONAL (inferida dos dados técnicos)
@@ -804,6 +927,43 @@ Regras: RECOMENDADO apenas se ≥3 confluências E sem evento Major nas próxima
       throw new Error("JSON inválido na resposta IA");
     }
     const result = JSON.parse(jsonStr);
+    // DETERMINISTIC ENFORCEMENT — the prompt instructs the AI to force AGUARDAR for
+    // imminent Major macro events and strong contrary candlestick patterns, but an
+    // LLM instruction is a strong suggestion, not a guarantee. Enforce both rules here
+    // in code so they can NEVER be silently skipped, regardless of what the model returns.
+    if (hasImminentMajor || hasStrongContraryPattern) {
+      const reasons = [];
+      if (hasImminentMajor) reasons.push("evento macro Major nas próximas 4h");
+      if (hasStrongContraryPattern) reasons.push(`padrão de candlestick forte (${patterns.find(p=>p.strength==="forte")?.name}) contrário à tendência`);
+      if (result.action !== "AGUARDAR") {
+        console.log(`[report] FORCED AGUARDAR — was "${result.action}", reasons: ${reasons.join(", ")}`);
+      }
+      result.action = "AGUARDAR";
+      result.recommendation = "NAO_RECOMENDADO";
+      result.confidence = Math.min(result.confidence ?? 40, 40);
+    }
+    // Ajuste 2 enforcement: on backtest-flagged pairs, confidence can NEVER exceed 55
+    // regardless of what the AI returns — this is a hard ceiling, not a suggestion,
+    // because the backtest already proved 3/3-confluence setups lose money here on
+    // large samples. A confident-sounding 80%+ recommendation on GBP/USD or EUR/JPY
+    // would contradict evidence we already have, so it's capped before the user ever sees it.
+    if (backtestCaution && typeof result.confidence === "number" && result.confidence > 55) {
+      console.log(`[report] CAPPED confidence on ${symbol} — was ${result.confidence}, capped to 55 (backtest caution pair)`);
+      result.confidence = 55;
+    }
+    // Ajuste 3 enforcement: on crypto pairs, force AGUARDAR when RSI sits in the
+    // neutral zone (35-65) — the backtest proved RSI Extremo is the ONLY profitable
+    // signal for BTC/ETH/SOL (Confluência 3/3 loses on all three), so a recommendation
+    // built on confluence alone, without RSI confirming an extreme, is exactly the
+    // setup that historically failed. This is deterministic, not advisory, matching
+    // the same enforcement pattern as Ajuste 1 (candlestick) and the macro-event gate.
+    const cryptoRsiNeutral = isCrypto && typeof rsi === "number" && rsi > 35 && rsi < 65;
+    if (cryptoRsiNeutral && result.action !== "AGUARDAR") {
+      console.log(`[report] FORCED AGUARDAR — crypto pair ${symbol} with RSI=${rsi} in neutral zone, was "${result.action}"`);
+      result.action = "AGUARDAR";
+      result.recommendation = "NAO_RECOMENDADO";
+      result.confidence = Math.min(result.confidence ?? 35, 35);
+    }
     // Sanitise risk_reward — extract only "1:X.X" pattern. BUGFIX: `if(result.risk_reward)`
     // alone misses the numeric 0 case (0 is falsy, so the block was skipped entirely and
     // a literal 0 passed straight through to the frontend, where `0 && <JSX>` short-circuits
@@ -831,6 +991,42 @@ Regras: RECOMENDADO apenas se ≥3 confluências E sem evento Major nas próxima
     }));
     // Attach raw candle patterns too (for UI display, independent of AI's text summary)
     result.candle_patterns = patterns;
+    // Expose whether AGUARDAR was code-enforced (not the AI's own choice) and why,
+    // so the frontend can show a clear, unmissable badge instead of this only
+    // existing as buried prose in the verdict/risks text.
+    if (hasImminentMajor || hasStrongContraryPattern) {
+      result.forced_wait_reasons = [
+        hasImminentMajor ? "Evento macro de Alto impacto nas próximas 4h" : null,
+        hasStrongContraryPattern ? `Padrão de candlestick forte (${patterns.find(p=>p.strength==="forte")?.name}) contrário à tendência` : null,
+      ].filter(Boolean);
+    }
+    // Ajuste 2: expose the backtest caution so the frontend can show a persistent
+    // badge on GBP/USD and EUR/JPY reports, even when the recommendation IS positive —
+    // unlike forced_wait_reasons (which only fires when AGUARDAR is forced), this is
+    // informational on every report for these two pairs, since the confidence cap
+    // applies regardless of the final action.
+    if (backtestCaution) {
+      result.backtest_caution = backtestCaution;
+    }
+    // Ajuste 3: expose crypto RSI guidance so the frontend can show a persistent
+    // badge on BTC/ETH/SOL reports explaining the RSI-Extremo-priority rule, plus
+    // whether this specific report's RSI is in the neutral zone that triggers the
+    // forced AGUARDAR (cryptoRsiNeutral).
+    if (cryptoGuidance) {
+      result.crypto_rsi_guidance = {
+        message: "Backtest (2026-06-29): para crypto, RSI Extremo (≤30 ou ≥70) é o único sinal historicamente lucrativo — Confluência 3/3 perde nos 3 pares (BTC -12.3%, ETH -20.6%, SOL -13.5%).",
+        rsi_neutral: cryptoRsiNeutral,
+      };
+    }
+    // Attach the 15-candle history for the visual mini-chart and trend narrative
+    result.candle_history = {
+      candles: candleHistory.candles,
+      pattern_hits: candleHistory.patternHits,
+      trend_summary: candleHistory.trendSummary,
+      net_change_pct: candleHistory.netChangePct,
+      up_days: candleHistory.upDays,
+      down_days: candleHistory.downDays,
+    };
     // Check alerts after report
     if (req.body.scanPairs) checkAlerts(req.body.scanPairs);
     res.json(result);
