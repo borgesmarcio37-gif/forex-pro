@@ -248,6 +248,87 @@ function parseCandles(values) {
   };
 }
 
+// ── CANDLESTICK PATTERN DETECTION ──────────────────────────────────────────────
+// Detects the most widely-recognised reversal/continuation patterns on the most
+// recent candle(s). This is ADDITIONAL CONTEXT for the AI report and the Guide —
+// it deliberately does NOT factor into the existing 3/3 confluence count or the
+// ⭐ qualification system, both of which are already calibrated against real
+// backtest data (2026-06-29, 11 pairs). Mixing a more subjective signal into that
+// rigid count would invalidate the calibration without new data to justify it.
+// Revisit this decision after running a backtest that includes candlestick patterns.
+function detectCandlePatterns(bars) {
+  // bars: array of {open, high, low, close}, OLDEST FIRST, needs at least 3 entries
+  if (!bars || bars.length < 3) return [];
+  const patterns = [];
+  const c0 = bars[bars.length-1]; // most recent (today/last close)
+  const c1 = bars[bars.length-2]; // previous
+  const c2 = bars[bars.length-3]; // two back (for 3-candle patterns)
+
+  const body  = c => Math.abs(c.close - c.open);
+  const range = c => c.high - c.low;
+  const upperWick = c => c.high - Math.max(c.open, c.close);
+  const lowerWick = c => Math.min(c.open, c.close) - c.low;
+  const isBull = c => c.close > c.open;
+  const isBear = c => c.close < c.open;
+
+  // Avoid division by zero on flat/illiquid bars
+  const r0 = range(c0) || 0.0001;
+  const b0 = body(c0);
+
+  // 1. Bullish Engulfing — bearish candle followed by a larger bullish candle
+  //    that fully engulfs its body. Classic reversal signal at the bottom of a move.
+  if (isBear(c1) && isBull(c0) && c0.close > c1.open && c0.open < c1.close) {
+    patterns.push({ name:"Bullish Engulfing", bias:"bullish", strength:"forte",
+      desc:"Vela bearish seguida por uma vela bullish maior que a engole completamente — reversão de fundo." });
+  }
+  // 2. Bearish Engulfing — mirror of the above, at the top of a move
+  if (isBull(c1) && isBear(c0) && c0.open > c1.close && c0.close < c1.open) {
+    patterns.push({ name:"Bearish Engulfing", bias:"bearish", strength:"forte",
+      desc:"Vela bullish seguida por uma vela bearish maior que a engole completamente — reversão de topo." });
+  }
+  // 3. Hammer — small body near the top of the range, long lower wick (≥2x body),
+  //    minimal upper wick. Signals rejection of lower prices — bullish at support.
+  //    Wick threshold is range-relative (not body-relative) — a tiny body shouldn't
+  //    make an otherwise-clear small upper wick disqualify the pattern.
+  if (b0 > 0 && lowerWick(c0) >= b0 * 2 && upperWick(c0) <= r0 * 0.15 && b0 / r0 < 0.35) {
+    patterns.push({ name:"Hammer (Martelo)", bias:"bullish", strength:"moderada",
+      desc:"Pavio inferior longo (≥2× corpo) com pouco pavio superior — rejeição de preços mais baixos." });
+  }
+  // 4. Shooting Star — mirror of Hammer, long upper wick, small body near the bottom.
+  //    Signals rejection of higher prices — bearish at resistance.
+  if (b0 > 0 && upperWick(c0) >= b0 * 2 && lowerWick(c0) <= r0 * 0.15 && b0 / r0 < 0.35) {
+    patterns.push({ name:"Shooting Star (Estrela Cadente)", bias:"bearish", strength:"moderada",
+      desc:"Pavio superior longo (≥2× corpo) com pouco pavio inferior — rejeição de preços mais altos." });
+  }
+  // 5. Doji — open and close almost identical, signals indecision. Direction depends
+  //    on what preceded it: after a strong trend, often precedes a reversal.
+  //    Excludes candles already classified as Hammer/Shooting Star (those are more
+  //    specific, directional patterns and should take priority over generic Doji).
+  const alreadyDirectional = patterns.some(p => p.name.startsWith("Hammer") || p.name.startsWith("Shooting Star"));
+  if (b0 / r0 < 0.1 && !alreadyDirectional) {
+    const precedingBull = isBull(c1);
+    patterns.push({ name:"Doji", bias: precedingBull ? "bearish (potencial)" : "bullish (potencial)", strength:"fraca",
+      desc:"Abertura e fecho quase idênticos — indecisão do mercado, possível pausa ou reversão após tendência." });
+  }
+  // 6. Morning Star — 3-candle bottom reversal: big bearish, small-body indecision
+  //    candle gapping down, then a big bullish candle closing well into candle 1's body.
+  if (isBear(c2) && body(c2) > range(c2)*0.5 &&
+      body(c1) < range(c2)*0.3 &&
+      isBull(c0) && c0.close > (c2.open + c2.close)/2) {
+    patterns.push({ name:"Morning Star (Estrela da Manhã)", bias:"bullish", strength:"forte",
+      desc:"3 velas: forte queda, indecisão, depois forte recuperação — reversão de fundo clássica." });
+  }
+  // 7. Evening Star — mirror of Morning Star, top reversal
+  if (isBull(c2) && body(c2) > range(c2)*0.5 &&
+      body(c1) < range(c2)*0.3 &&
+      isBear(c0) && c0.close < (c2.open + c2.close)/2) {
+    patterns.push({ name:"Evening Star (Estrela da Noite)", bias:"bearish", strength:"forte",
+      desc:"3 velas: forte subida, indecisão, depois forte queda — reversão de topo clássica." });
+  }
+
+  return patterns;
+}
+
 // ── SESSIONS ──────────────────────────────────────────────────────────────────
 const SESSIONS = {
   "EUR/USD": { best:["Londres 07h–10h","NY AM 13h30–16h"],   avoid:"Asiática (00h–07h)",  notes:"Máxima liquidez na sobreposição Londres/NY" },
@@ -422,14 +503,20 @@ app.get("/api/scan", async (req, res) => {
       const price=closes[closes.length-1],prev=closes[closes.length-2],today=raw[raw.length-1];
       const rsiVal=calcRSI(closes),macdVal=calcMACD(closes);
       const {ideal,cur} = getSessionInfo(symbol);
+      // Candlestick patterns — additional context only, not part of the 3/3 confluence
+      const candleBars = raw.slice(-5).map(v => ({
+        open: parseFloat(v.open), high: parseFloat(v.high), low: parseFloat(v.low), close: parseFloat(v.close),
+      }));
+      const candlePatterns = detectCandlePatterns(candleBars);
       results.push({symbol,price,change_pct:((price-prev)/prev)*100,
         high:parseFloat(today.high),low:parseFloat(today.low),
         atr_pips:atrPips,atr_raw:atrVal,rsi:rsiVal,macd:macdVal,
         ema50:ema50v,ema200:ema200v,trend:price>ema200v?"bull":"bear",
         tier:TIER1.includes(symbol)?1:isCrypto?"crypto":2,
         is_crypto:isCrypto,
-        ideal_session:ideal});
-      console.log(`  ✓ ${symbol.padEnd(7)} ${price.toFixed(isJpy?2:4).padEnd(10)} ATR=${isCrypto?"$":""}${String(atrPips).padEnd(4)}${isCrypto?"":"p"} RSI=${rsiVal.toFixed(1)} ${ideal?"✅":"⏳"}`);
+        ideal_session:ideal,
+        candle_patterns:candlePatterns});
+      console.log(`  ✓ ${symbol.padEnd(7)} ${price.toFixed(isJpy?2:4).padEnd(10)} ATR=${isCrypto?"$":""}${String(atrPips).padEnd(4)}${isCrypto?"":"p"} RSI=${rsiVal.toFixed(1)} ${ideal?"✅":"⏳"}${candlePatterns.length?` 🕯️${candlePatterns.map(p=>p.name).join(",")}`:""}`);
     } catch(e) { console.error(`  ✗ ${symbol}:`,e.message); }
   }
   scanInProgress = false;
@@ -524,8 +611,9 @@ async function checkMacroAlerts(pairs) {
 // ── MASTER PROMPT v6 REPORT ───────────────────────────────────────────────────
 app.post("/api/report", async (req, res) => {
   if (!AKEY) return res.status(400).json({error:"ANTHROPIC_API_KEY não configurada no .env"});
-  const {symbol,price,change_pct,high,low,atr_pips,rsi,macd,ema50,ema200,trend} = req.body;
+  const {symbol,price,change_pct,high,low,atr_pips,rsi,macd,ema50,ema200,trend,candle_patterns} = req.body;
   const bull=trend==="bull", mb=(macd?.hist||0)>0;
+  const patterns = candle_patterns || []; // reuse what /api/scan already computed — avoids a redundant API call
 
   // Fetch real macro events for this pair's currencies (next 48h)
   let macroEvents = [];
@@ -602,6 +690,14 @@ Nota: ${sess.notes}
 Próxima janela ideal: ${next}
 
 ═══════════════════════════════════════════════════════
+PADRÕES DE CANDLESTICK (vela mais recente, contexto adicional — NÃO faz parte da contagem de confluência 3/3)
+═══════════════════════════════════════════════════════
+${patterns.length > 0
+  ? patterns.map(p => `[${p.strength.toUpperCase()}] ${p.name} — viés ${p.bias} — ${p.desc}`).join("\n")
+  : "Nenhum padrão de candlestick relevante identificado na vela mais recente."}
+${patterns.some(p=>p.bias.includes(bull?"bearish":"bullish")) ? "\n⚠️ Atenção: padrão de candlestick detectado aponta na direcção OPOSTA à tendência técnica — menciona esta divergência explicitamente na análise." : ""}
+
+═══════════════════════════════════════════════════════
 ANÁLISE INSTITUCIONAL (inferida dos dados técnicos)
 ═══════════════════════════════════════════════════════
 COT inferido: ${bull&&rsi<60?"Large Speculators provavelmente LONG":!bull&&rsi>40?"Large Speculators provavelmente SHORT":"Posicionamento neutro/indefinido"}
@@ -640,6 +736,7 @@ INSTRUÇÃO: Com base em TODOS os dados acima, devolve este JSON exacto:
     "recommendation": "instrução clara: quando e como entrar com hora Lisboa",
     "next_ideal_window": "${next}"
   },
+  "candlestick_analysis": "${patterns.length>0?"comenta o(s) padrão(ões) listado(s) acima — se confirma ou contradiz a tendência técnica, e como isso afecta a tua confiança":"Sem padrão de candlestick relevante na vela mais recente — diz isso claramente em 1 frase"}",
   "institutional": {
     "available": false,
     "bias": "Bullish" ou "Bearish" ou "Neutro",
@@ -707,9 +804,14 @@ Regras: RECOMENDADO apenas se ≥3 confluências E sem evento Major nas próxima
       throw new Error("JSON inválido na resposta IA");
     }
     const result = JSON.parse(jsonStr);
-    // Sanitise risk_reward — extract only "1:X.X" pattern
-    if(result.risk_reward) {
-      const m = String(result.risk_reward).match(/1:[\d.]+/);
+    // Sanitise risk_reward — extract only "1:X.X" pattern. BUGFIX: `if(result.risk_reward)`
+    // alone misses the numeric 0 case (0 is falsy, so the block was skipped entirely and
+    // a literal 0 passed straight through to the frontend, where `0 && <JSX>` short-circuits
+    // to the number 0 itself instead of rendering nothing — React then prints it as a stray
+    // text node, invisible until the user selects the whole page). Now explicitly normalise
+    // anything that isn't a valid "1:X.X" string to null, regardless of falsy/truthy type.
+    {
+      const m = String(result.risk_reward ?? "").match(/1:[\d.]+/);
       result.risk_reward = m ? m[0] : null;
     }
     // Ensure stop_loss.price and take_profit prices are strings, not numbers
@@ -719,7 +821,7 @@ Regras: RECOMENDADO apenas se ≥3 confluências E sem evento Major nas próxima
     // (sometimes AI returns extra fields not in the schema)
     const ALLOWED = ["recommendation","direction","action","confidence","verdict","summary",
       "session_analysis","volume_analysis","institutional","entry","stop_loss",
-      "take_profits","risks","checklist","risk_reward","pip_ladder","macro_warning"];
+      "take_profits","risks","checklist","risk_reward","pip_ladder","macro_warning","candlestick_analysis"];
     Object.keys(result).forEach(k => { if(!ALLOWED.includes(k)) { console.log(`[report] Removing extra field: ${k} =`, result[k]); delete result[k]; } });
     console.log("[report] risk_reward:", result.risk_reward);
     // Attach raw real macro events (for UI display, independent of AI's text summary)
@@ -727,6 +829,8 @@ Regras: RECOMENDADO apenas se ≥3 confluências E sem evento Major nas próxima
       country: e.country, report_name: e.report_name, economicImpact: e.economicImpact,
       datetime: e.datetime, previous: e.previous, consensus: e.consensus, actual: e.actual,
     }));
+    // Attach raw candle patterns too (for UI display, independent of AI's text summary)
+    result.candle_patterns = patterns;
     // Check alerts after report
     if (req.body.scanPairs) checkAlerts(req.body.scanPairs);
     res.json(result);

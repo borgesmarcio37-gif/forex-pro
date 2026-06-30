@@ -293,9 +293,9 @@ function AiReport({report,loading,error,onRefresh,symbol,igAccount,igStatus}){
   );
   if(!report) return null;
 
-  const {recommendation,direction,action,confidence,verdict,summary,session_analysis,volume_analysis,institutional,entry,stop_loss:sl_raw,take_profits,risks,checklist,risk_reward,macro_warning,macro_events} = report;
+  const {recommendation,direction,action,confidence,verdict,summary,session_analysis,volume_analysis,institutional,entry,stop_loss:sl_raw,take_profits,risks,checklist,risk_reward,macro_warning,macro_events,candlestick_analysis,candle_patterns} = report;
   // Sanitise to prevent number leak as invisible text nodes
-  const stop_loss = sl_raw ? {...sl_raw, price: String(sl_raw.price||"—"), pips: sl_raw.pips||0} : null;
+  const stop_loss = sl_raw ? {...sl_raw, price: String(sl_raw.price||"—"), pips: sl_raw.pips||"—"} : null;
   const isRec = recommendation==="RECOMENDADO";
   const rc = isRec?(direction==="LONG"?"#22c55e":"#ef4444"):"#6a9ab8";
 
@@ -424,6 +424,37 @@ function AiReport({report,loading,error,onRefresh,symbol,igAccount,igStatus}){
         <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.85}}>{summary}</div>
       </C>
 
+      {/* Candlestick patterns — additional context, not part of 3/3 confluence */}
+      <C style={{borderColor: candle_patterns?.length>0 ? "rgba(167,139,250,.35)" : undefined, background: candle_patterns?.length>0 ? "rgba(167,139,250,.04)" : undefined}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:candle_patterns?.length>0?10:0}}>
+          <L t="🕯️ Padrões de Candlestick" color={candle_patterns?.length>0?"#a78bfa":undefined} mb={0}/>
+          <Tag t="Contexto extra" color="#6a6a78"/>
+        </div>
+        {candle_patterns?.length>0?(
+          <div style={{display:"grid",gap:8}}>
+            {candle_patterns.map((p,i)=>{
+              const isBullish = p.bias.startsWith("bullish");
+              const pc = isBullish?"#22c55e":p.bias.startsWith("bearish")?"#ef4444":"#f59e0b";
+              return(
+                <div key={i} style={{padding:"9px 12px",background:"rgba(10,20,40,.4)",borderRadius:7,border:`1px solid ${pc}33`}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                    <span style={{fontSize:11,fontWeight:700,color:pc}}>{p.name}</span>
+                    <Tag t={p.strength} color={pc}/>
+                    <span style={{fontSize:10,color:pc}}>{isBullish?"📈":p.bias.startsWith("bearish")?"📉":"⚪"} {p.bias}</span>
+                  </div>
+                  <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.6}}>{p.desc}</div>
+                </div>
+              );
+            })}
+            {candlestick_analysis&&<div style={{marginTop:4,fontSize:11,color:"#a78bfa",lineHeight:1.7,fontStyle:"italic"}}>{candlestick_analysis}</div>}
+          </div>
+        ):(
+          <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+            {candlestick_analysis || "Sem padrão de candlestick relevante identificado na vela mais recente."}
+          </div>
+        )}
+      </C>
+
       {/* Volume + Institutional */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
         <C>
@@ -517,12 +548,12 @@ function AiReport({report,loading,error,onRefresh,symbol,igAccount,igStatus}){
               </div>
             );
           })}
-          {risk_reward&&(()=>{
+          {(risk_reward && risk_reward !== 0) ? (()=>{
             const rb = String(risk_reward).replace(/[\n\r]/g," ").trim();
             const match = rb.match(/1:\d+(\.\d+)?/);
             const display = match ? match[0] : rb.split(" ")[0];
-            return <div style={{marginTop:10,padding:"8px 12px",background:"rgba(26,95,212,0.1)",borderRadius:6,fontSize:12,color:"#4da6ff"}}>⚖️ R/B: <strong>{display}</strong></div>;
-          })()}
+            return display ? <div style={{marginTop:10,padding:"8px 12px",background:"rgba(26,95,212,0.1)",borderRadius:6,fontSize:12,color:"#4da6ff"}}>⚖️ R/B: <strong>{display}</strong></div> : null;
+          })() : null}
         </C>
       )}
     </div>
@@ -985,7 +1016,7 @@ export default function App(){
                   <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                     <thead>
                       <tr style={{borderBottom:"1px solid #0d2040"}}>
-                        {["Par","Tier","Preço","Variação","ATR (pips)","RSI","Tendência","Volatilidade","Setup"].map(h=>(
+                        {["Par","Tier","Preço","Variação","ATR (pips)","RSI","Tendência","Volatilidade","Velas","Setup"].map(h=>(
                           <th key={h} style={{padding:"8px 10px",color:"#253a5e",fontWeight:600,textAlign:"left",fontSize:10}}>{h}</th>
                         ))}
                       </tr>
@@ -1009,6 +1040,13 @@ export default function App(){
                               <div style={{width:CRYPTO.includes(p.symbol)?Math.min(p.atr_pips*.03,70):Math.min(p.atr_pips*.35,70),height:5,borderRadius:3,background:CRYPTO.includes(p.symbol)?"#f59e0b":p.atr_pips>=80?"#22c55e":p.atr_pips>=50?"#f59e0b":"#ef4444",opacity:.75}}/>
                               <span style={{fontSize:10,color:"#253a5e"}}>{CRYPTO.includes(p.symbol)?(p.atr_pips>=500?"Alta":p.atr_pips>=100?"Média":"Baixa"):(p.atr_pips>=80?"Alta":p.atr_pips>=50?"Média":"Baixa")}</span>
                             </div>
+                          </td>
+                          <td style={{padding:"9px 10px",textAlign:"center"}}>
+                            {p.candle_patterns?.length>0?(
+                              <span title={p.candle_patterns.map(cp=>`${cp.name} (${cp.bias})`).join(" · ")} style={{fontSize:13,cursor:"help"}}>
+                                🕯️<span style={{fontSize:9,color:p.candle_patterns[0].bias.startsWith("bullish")?"#22c55e":p.candle_patterns[0].bias.startsWith("bearish")?"#ef4444":"#f59e0b",marginLeft:2}}>{p.candle_patterns.length}</span>
+                              </span>
+                            ):<span style={{color:"#1a3a5e",fontSize:11}}>—</span>}
                           </td>
                           <td style={{padding:"9px 10px",textAlign:"center"}}>
                             {qualified?(
@@ -1458,6 +1496,37 @@ export default function App(){
             <C glow style={{padding:"20px 22px"}}>
               <div style={{fontSize:18,fontWeight:800,color:"#4da6ff",marginBottom:6}}>📖 Guia de Indicadores</div>
               <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.7}}>Tudo o que precisas de saber para interpretar os dados e tomar decisões de trading com confiança.</div>
+            </C>
+
+            {/* Candlestick Patterns */}
+            <C style={{borderColor:"rgba(167,139,250,.35)"}}>
+              <L t="🕯️ Padrões de Candlestick" color="#a78bfa"/>
+              <div style={{fontSize:12,color:"#8aaccc",lineHeight:1.8,marginBottom:12}}>
+                Padrões formados pela forma de uma ou mais velas (a relação entre abertura, fecho, máximo e mínimo) que historicamente precedem reversões ou confirmam continuações. A app detecta-os automaticamente na vela mais recente de cada par.
+              </div>
+              <div style={{padding:"10px 12px",background:"rgba(245,158,11,.06)",borderRadius:8,border:"1px solid rgba(245,158,11,.2)",fontSize:11,color:"#d4a843",lineHeight:1.7,marginBottom:14}}>
+                ⚠️ <strong>Importante:</strong> Estes padrões são <strong>contexto adicional</strong> — não fazem parte da contagem de confluência 3/3 nem do critério ⭐, que já foram calibrados com backtest real. Usa-os para reforçar ou questionar uma decisão, nunca como sinal isolado.
+              </div>
+              <div style={{display:"grid",gap:8}}>
+                {[
+                  {n:"Bullish / Bearish Engulfing",f:"forte",d:"Uma vela maior \"engole\" completamente a anterior, na direcção oposta. O sinal de reversão mais fiável dos padrões simples."},
+                  {n:"Hammer (Martelo)",f:"moderada",d:"Corpo pequeno no topo, pavio inferior longo. Mostra que o mercado rejeitou preços mais baixos — bullish, especialmente perto de suporte."},
+                  {n:"Shooting Star (Estrela Cadente)",f:"moderada",d:"Espelho do Martelo — corpo pequeno em baixo, pavio superior longo. Rejeição de preços mais altos — bearish perto de resistência."},
+                  {n:"Doji",f:"fraca",d:"Abertura e fecho quase iguais — indecisão pura. Sozinho diz pouco, mas após uma tendência forte pode anunciar pausa ou reversão."},
+                  {n:"Morning / Evening Star",f:"forte",d:"Padrão de 3 velas — movimento forte, indecisão, depois movimento forte na direcção oposta. Reversão clássica de fundo/topo."},
+                ].map(p=>(
+                  <div key={p.n} style={{padding:"9px 12px",background:"rgba(10,20,40,.4)",borderRadius:7}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                      <span style={{fontSize:11,fontWeight:700,color:"#c8e0ff"}}>{p.n}</span>
+                      <Tag t={p.f} color={p.f==="forte"?"#22c55e":p.f==="moderada"?"#f59e0b":"#6a6a78"}/>
+                    </div>
+                    <div style={{fontSize:11,color:"#8aaccc",lineHeight:1.6}}>{p.d}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{marginTop:12,padding:"10px 12px",background:"rgba(167,139,250,.08)",borderRadius:8,fontSize:11,color:"#8aaccc",lineHeight:1.7}}>
+                <strong style={{color:"#a78bfa"}}>Onde ver:</strong> Coluna "Velas" no Scanner (🕯️ + número de padrões detectados), e secção dedicada no Relatório IA de cada par — onde a IA comenta explicitamente se o padrão confirma ou contradiz a tendência técnica.
+              </div>
             </C>
 
             {/* ATR */}
